@@ -7,15 +7,10 @@ using UnityEngine;
 
 namespace ShadowDungeonTrainer;
 
-/// <summary>
-/// 修改器核心管理器：创建 IMGUI MonoBehaviour，Home 键切换面板，
-/// 读取 PlayerManager 属性 → 行列布局 → 输入框 → 确定/重置。
-/// </summary>
 public static class TrainerManager
 {
     private static ManualLogSource _log = null!;
     private static bool _initialized;
-
     internal static ManualLogSource Log => _log;
 
     public static void Init(ManualLogSource log)
@@ -23,18 +18,14 @@ public static class TrainerManager
         if (_initialized) return;
         _initialized = true;
         _log = log;
-
         var go = new GameObject("ShadowDungeonTrainer_HUD");
         UnityEngine.Object.DontDestroyOnLoad(go);
         go.hideFlags = HideFlags.HideAndDontSave;
         go.AddComponent<TrainerBehaviour>();
-        log.LogInfo("[Trainer] HUD GameObject created");
+        log.LogInfo("[Trainer] HUD created");
     }
 }
 
-/// <summary>
-/// MonoBehaviour 宿主：每帧检测 Home 键 + IMGUI 渲染。
-/// </summary>
 public class TrainerBehaviour : MonoBehaviour
 {
     private bool _showPanel;
@@ -43,23 +34,18 @@ public class TrainerBehaviour : MonoBehaviour
     private readonly List<AttrEntry> _attrs = new();
     private PlayerManager? _player;
 
-    private readonly Dictionary<string, string> _inputBuffers = new();
-    // ⚠️ 原始值：只在首次扫描时捕获一次，永不覆盖
-    private readonly Dictionary<string, string> _trueOriginalValues = new();
-    private bool _originalCaptured;
+    // 核心：基准值（确认后的状态）+ 修改器值（用户输入的）
+    private readonly Dictionary<string, string> _baseValues = new();   // 基准 = 上一次确认的真实值
+    private readonly Dictionary<string, string> _inputBuffers = new(); // 修改器输入框
 
-    // 缓存的 GUIStyle（避免每帧 GC）
     private GUIStyle? _labelStyle, _headerStyle, _titleStyle, _sectionStyle;
-
-    private object? _talentMgr;
-    private object? _saveMgr;
 
     private void Update()
     {
         if (Input.GetKeyDown(KeyCode.Home))
         {
             _showPanel = !_showPanel;
-            if (_showPanel) RefreshPlayerAndAttrs();
+            if (_showPanel) FullScan();
         }
     }
 
@@ -67,7 +53,6 @@ public class TrainerBehaviour : MonoBehaviour
     {
         if (!_showPanel) return;
 
-        // ── 全局字体（用 cached 避免每帧 GC）──
         if (_labelStyle == null)
         {
             _labelStyle = new GUIStyle(GUI.skin.label) { fontSize = 16 };
@@ -81,156 +66,128 @@ public class TrainerBehaviour : MonoBehaviour
         var panelRect = new Rect(20, 20, 780, Screen.height - 40);
         GUI.Box(panelRect, "");
 
-        // 标题 + 中英切换
+        // 标题
         string title = _useChinese ? "Shadow Dungeon 修改器 (Home 切换)" : "Shadow Dungeon TRAINER (Home toggle)";
         GUI.Label(new Rect(20, 25, 660, 35), title, _titleStyle);
-
-        string langBtn = _useChinese ? "EN" : "中";
-        if (GUI.Button(new Rect(680, 28, 60, 26), langBtn))
+        if (GUI.Button(new Rect(690, 28, 60, 26), _useChinese ? "EN" : "中"))
             _useChinese = !_useChinese;
 
         if (_player == null)
         {
-            string msg = _useChinese ? "未检测到玩家，请先进入游戏关卡" : "PlayerManager not found - enter a game level first";
-            GUI.Label(new Rect(20, 70, 700, 30), msg);
-            string rescanLabel = _useChinese ? "重新扫描" : "Rescan";
-            if (GUI.Button(new Rect(20, 110, 120, 30), rescanLabel))
-                RefreshPlayerAndAttrs();
+            GUI.Label(new Rect(20, 70, 700, 30), _useChinese ? "未检测到玩家，请先进入游戏关卡" : "PlayerManager not found");
+            if (GUI.Button(new Rect(20, 110, 120, 30), _useChinese ? "重新扫描" : "Rescan"))
+                FullScan();
             return;
         }
 
         // 按钮栏
-        GUILayout.BeginArea(new Rect(25, 60, 720, 35));
+        GUILayout.BeginArea(new Rect(25, 62, 740, 36));
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button(_useChinese ? "刷新当前值" : "Refresh", GUILayout.Width(100)))
-            RefreshCurrentDisplayOnly();
+        if (GUILayout.Button(_useChinese ? "刷新基准" : "Sync Base", GUILayout.Width(110)))
+            SyncBaseToCurrent();
         if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(100)))
             ApplyAll();
-        if (GUILayout.Button(_useChinese ? "恢复原始值" : "Restore Original", GUILayout.Width(110)))
-            RestoreOriginal();
         if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(100)))
             ResetAll();
-        if (GUILayout.Button(_useChinese ? "重新计算属性" : "Recalc Stats", GUILayout.Width(120)))
-            RecalcStats();
         GUILayout.FlexibleSpace();
         GUILayout.Label(string.Format("Lv.{0}  HP:{1:F0}  MP:{2:F0}", _player.Level, _player.Health, _player.Mana), GUILayout.Width(300));
         GUILayout.EndHorizontal();
         GUILayout.EndArea();
 
         // 表头
-        float headerY = 100;
-        GUI.Label(new Rect(25, headerY, 220, 24), _useChinese ? "属性名" : "Attribute", _headerStyle);
-        GUI.Label(new Rect(245, headerY, 110, 24), _useChinese ? "当前值" : "Current", _headerStyle);
-        GUI.Label(new Rect(355, headerY, 140, 24), _useChinese ? "修改值" : "New Value", _headerStyle);
-        GUI.Label(new Rect(505, headerY, 55, 24), "OK", _headerStyle);
-        GUI.Label(new Rect(570, headerY, 55, 24), _useChinese ? "重置" : "Reset", _headerStyle);
+        GUI.Label(new Rect(25, 102, 220, 24), _useChinese ? "属性名" : "Attribute", _headerStyle);
+        GUI.Label(new Rect(245, 102, 110, 24), _useChinese ? "当前值" : "Current", _headerStyle);
+        GUI.Label(new Rect(355, 102, 140, 24), _useChinese ? "修改值" : "New Value", _headerStyle);
+        GUI.Label(new Rect(505, 102, 55, 24), "OK", _headerStyle);
+        GUI.Label(new Rect(570, 102, 55, 24), _useChinese ? "重置" : "Reset", _headerStyle);
 
-        // 滚动区域
+        // 滚动列表
         _scrollPos = GUI.BeginScrollView(
-            new Rect(25, 128, 740, panelRect.height - 148),
+            new Rect(25, 130, 740, panelRect.height - 150),
             _scrollPos,
             new Rect(0, 0, 710, _attrs.Count * 36 + 70));
 
         float y = 5;
-
-        // ── 分组：先画「退出保存」的属性 ──
         var savedAttrs = _attrs.Where(a => a.Save == SaveStatus.Saved).ToList();
         var notSavedAttrs = _attrs.Where(a => a.Save == SaveStatus.NotSaved).ToList();
 
         if (savedAttrs.Count > 0)
         {
-            DrawSectionHeader(ref y, _useChinese ? "✅ 退出后保存" : "✅ Persists after exit");
-            foreach (var attr in savedAttrs)
-                DrawAttrRow(ref y, attr);
+            DrawSection(ref y, _useChinese ? "✅ 退出后保存" : "✅ Persists after exit");
+            foreach (var a in savedAttrs) DrawRow(ref y, a);
         }
-
         if (notSavedAttrs.Count > 0)
         {
-            DrawSectionHeader(ref y, _useChinese ? "⚠️ 退出后重置（当前生效）" : "⚠️ Resets on exit (current session only)");
-            foreach (var attr in notSavedAttrs)
-                DrawAttrRow(ref y, attr);
+            DrawSection(ref y, _useChinese ? "⚠️ 退出后重置（当前生效）" : "⚠️ Resets on exit");
+            foreach (var a in notSavedAttrs) DrawRow(ref y, a);
         }
 
         GUI.EndScrollView();
     }
 
-    private void DrawSectionHeader(ref float y, string text)
+    // ── 分组标题 ──
+    private void DrawSection(ref float y, string text)
     {
         GUI.Label(new Rect(0, y, 600, 28), text, _sectionStyle);
         y += 32;
     }
 
-    private void DrawAttrRow(ref float y, AttrEntry attr)
+    // ── 属性行 ──
+    private void DrawRow(ref float y, AttrEntry attr)
     {
-        const float labelW = 220;
-        const float valueW = 110;
-        const float inputW = 140;
-        const float btnW = 55;
-        const float rowH = 32;
-        const float gap = 4;
+        const float LW = 220, VW = 110, IW = 140, BW = 55, RH = 32, G = 4;
 
-        string displayName = _useChinese ? attr.NameCN : attr.NameEN;
-        GUI.Label(new Rect(0, y, labelW, rowH), displayName, _labelStyle);
+        string name = _useChinese ? attr.NameCN : attr.NameEN;
+        GUI.Label(new Rect(0, y, LW, RH), name, _labelStyle);
 
-        var currentVal = attr.GetValue(_player!);
-        GUI.Label(new Rect(labelW, y, valueW, rowH), currentVal, _labelStyle);
+        string current = attr.GetValue(_player!);
+        GUI.Label(new Rect(LW, y, VW, RH), current, _labelStyle);
 
         if (!_inputBuffers.ContainsKey(attr.Key))
-            _inputBuffers[attr.Key] = currentVal;
-        _inputBuffers[attr.Key] = GUI.TextField(
-            new Rect(labelW + valueW, y, inputW, rowH),
-            _inputBuffers[attr.Key]);
+            _inputBuffers[attr.Key] = current;
+        _inputBuffers[attr.Key] = GUI.TextField(new Rect(LW + VW, y, IW, RH), _inputBuffers[attr.Key]);
 
-        if (GUI.Button(new Rect(labelW + valueW + inputW + gap, y, btnW, rowH), "OK"))
+        // OK：记录基准 = 改之前的值，然后应用
+        if (GUI.Button(new Rect(LW + VW + IW + G, y, BW, RH), "OK"))
         {
-            // 应用前先记录当前值（这样"恢复原始值"能恢复到修改器改动前的状态）
-            var beforeApply = attr.GetValue(_player!);
+            string before = attr.GetValue(_player!);
             if (attr.TrySetValue(_player!, _inputBuffers[attr.Key]))
             {
-                _trueOriginalValues[attr.Key] = beforeApply;
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", displayName, beforeApply, _inputBuffers[attr.Key]));
+                _baseValues[attr.Key] = before;
+                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", name, before, _inputBuffers[attr.Key]));
             }
         }
 
-        string resetLabel = _useChinese ? "重置" : "Reset";
-        if (GUI.Button(new Rect(labelW + valueW + inputW + gap * 2 + btnW, y, btnW, rowH), resetLabel))
+        // 重置：回到基准值
+        if (GUI.Button(new Rect(LW + VW + IW + G * 2 + BW, y, BW, RH), _useChinese ? "重置" : "Reset"))
         {
-            if (_trueOriginalValues.TryGetValue(attr.Key, out var orig))
+            if (_baseValues.TryGetValue(attr.Key, out var bas))
             {
-                _inputBuffers[attr.Key] = orig;
-                attr.TrySetValue(_player!, orig);
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset -> {1}", displayName, orig));
+                _inputBuffers[attr.Key] = bas;
+                attr.TrySetValue(_player!, bas);
+                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset -> {1}", name, bas));
             }
         }
 
-        y += rowH + gap;
+        y += RH + G;
     }
 
-    private void RefreshPlayerAndAttrs()
+    // ── 全量扫描（首次进入 / 重新扫描）──
+    private void FullScan()
     {
         _player = FindObjectOfType<PlayerManager>();
-        if (_player == null)
-        {
-            TrainerManager.Log.LogWarning("[Trainer] PlayerManager not found");            return;
-        }
+        if (_player == null) { TrainerManager.Log.LogWarning("[Trainer] PlayerManager not found"); return; }
 
         _attrs.Clear();
+        _baseValues.Clear();
         _inputBuffers.Clear();
-        // ⚠️ _trueOriginalValues 不清空——只在首次扫描时捕获
-        // ⚠️ _originalCaptured 不重置——保证原始值永不被覆盖
 
-        // ══════════════════════════════════════════
-        //  ✅ 退出后保存的属性
-        // ══════════════════════════════════════════
-
-        // 基础
+        // ══ ✅ 退出后保存 ══
         S("Health",           "生命值",       "HP",              AttrType.Float);
         S("Mana",             "法力值",       "MP",              AttrType.Float);
         S("Level",            "等级",         "Level",           AttrType.Int);
         S("Xp_Total",         "总经验值",     "Total XP",        AttrType.Float);
         S("Xp_CurrentLevel",  "当前等级经验",  "Level XP",       AttrType.Float);
-
-        // 倍率（存档中，加载不被覆盖）
         S("Damage_Bei",       "攻击倍率",     "ATK Mult",        AttrType.Float);
         S("Damage_Anti",      "伤害减免",     "DMG Reduction",   AttrType.Float);
         S("MVSpeed_Bei",      "移动速度倍率",  "Move Spd Mult",  AttrType.Float);
@@ -239,345 +196,163 @@ public class TrainerBehaviour : MonoBehaviour
         S("Health_Percent",   "生命百分比",   "HP Percent",      AttrType.Float);
         S("Mana_Bei",         "法力倍率",     "MP Mult",         AttrType.Float);
         S("Mana_Percent",     "法力百分比",   "MP Percent",      AttrType.Float);
-
-        // 暴击/穿透/格挡
         S("BJrate",           "暴击率",       "Crit Rate",       AttrType.Float);
         S("BJDamage",         "暴击伤害",     "Crit Damage",     AttrType.Float);
         S("JYrate",           "穿透率",       "Penetration",     AttrType.Float);
         S("GeDang",           "格挡",         "Block",           AttrType.Float);
-
-        // 元素倍率/穿透/抗性
         S("FireDamage_Bei",   "火伤倍率",     "Fire DMG Mult",   AttrType.Float);
         S("FrozenDamage_Bei", "冰伤倍率",     "Ice DMG Mult",    AttrType.Float);
         S("ThunderDamage_Bei","雷伤倍率",     "Thunder DMG Mult",AttrType.Float);
         S("PoisonDamage_Bei", "毒伤倍率",     "Poison DMG Mult", AttrType.Float);
         S("PhysicsDamage_Bei","物理伤倍率",   "Phys DMG Mult",   AttrType.Float);
         S("ShadowDamage_Bei", "暗影伤倍率",   "Shadow DMG Mult", AttrType.Float);
-
         S("FireChuan",        "火穿透",       "Fire Pen",        AttrType.Float);
         S("FrozenChuan",      "冰穿透",       "Ice Pen",         AttrType.Float);
         S("ThunderChuan",     "雷穿透",       "Thunder Pen",     AttrType.Float);
         S("PoisonChuan",      "毒穿透",       "Poison Pen",      AttrType.Float);
         S("PhysicsChuan",     "物理穿透",     "Phys Pen",        AttrType.Float);
         S("ShadowChuan",      "暗影穿透",     "Shadow Pen",      AttrType.Float);
-
         S("FireAnti",         "火抗",         "Fire Res",        AttrType.Float);
         S("FrozenAnti",       "冰抗",         "Ice Res",         AttrType.Float);
         S("ThunderAnti",      "雷抗",         "Thunder Res",     AttrType.Float);
         S("PoisonAnti",       "毒抗",         "Poison Res",      AttrType.Float);
         S("PhysicsAnti",      "物抗",         "Phys Res",        AttrType.Float);
         S("ShadowAnti",       "暗影抗",       "Shadow Res",      AttrType.Float);
-
-        // 其他
         S("CoolDown",         "冷却缩减",     "CD Reduction",    AttrType.Float);
         S("ItemDrop_Rate",    "掉落率",       "Drop Rate",       AttrType.Float);
         S("EXP_Range",        "经验范围",     "EXP Range",       AttrType.Float);
-
-        // 金币
         TryAddMoneyAttr();
-
-        // 天赋点
         TryAddTalentAttrs();
 
-        // ══════════════════════════════════════════
-        //  ⚠️ 退出后重置的属性（当前生效）
-        // ══════════════════════════════════════════
-
+        // ══ ⚠️ 退出后重置 ══
         N("Damage_Base",      "基础攻击力",    "ATK Base",       AttrType.Float);
         N("MVSpeed_Base",     "移动速度基础",  "Move Spd Base",  AttrType.Float);
         N("ATSpeed_Base",     "攻击速度基础",  "ATK Spd Base",   AttrType.Float);
 
-        RefreshCurrentValues(true);
-        TrainerManager.Log.LogInfo(string.Format("[Trainer] Found PlayerManager, {0} attributes ({1} saved, {2} temp)",
-            _attrs.Count,
-            _attrs.Count(a => a.Save == SaveStatus.Saved),
-            _attrs.Count(a => a.Save == SaveStatus.NotSaved)));
+        // 基准值 = 当前真实值
+        foreach (var a in _attrs)
+            _baseValues[a.Key] = a.GetValue(_player);
+
+        TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs registered", _attrs.Count));
     }
 
-    // ── 便捷方法：保存/不保存 ──
-    private void S(string field, string cn, string en, AttrType type) =>
-        AddAttr(field, cn, en, type, SaveStatus.Saved);
+    // ── 刷新基准：把基准值更新为当前真实状态（含升级/换装备）──
+    private void SyncBaseToCurrent()
+    {
+        if (_player == null) return;
+        var fresh = FindObjectOfType<PlayerManager>();
+        if (fresh != null) _player = fresh;
+        foreach (var a in _attrs)
+        {
+            string val = a.GetValue(_player);
+            _baseValues[a.Key] = val;
+            _inputBuffers[a.Key] = val;
+        }
+        TrainerManager.Log.LogInfo("[Trainer] Base synced to current state");
+    }
 
-    private void N(string field, string cn, string en, AttrType type) =>
-        AddAttr(field, cn, en, type, SaveStatus.NotSaved);
+    // ── 全部应用 ──
+    private void ApplyAll()
+    {
+        if (_player == null) return;
+        foreach (var a in _attrs)
+        {
+            if (_inputBuffers.TryGetValue(a.Key, out var input))
+            {
+                string before = a.GetValue(_player);
+                if (a.TrySetValue(_player, input))
+                    _baseValues[a.Key] = before;
+            }
+        }
+        TrainerManager.Log.LogInfo("[Trainer] All applied");
+    }
+
+    // ── 全部重置：回到基准值 ──
+    private void ResetAll()
+    {
+        if (_player == null) return;
+        foreach (var a in _attrs)
+        {
+            if (_baseValues.TryGetValue(a.Key, out var bas))
+            {
+                _inputBuffers[a.Key] = bas;
+                a.TrySetValue(_player, bas);
+            }
+        }
+        TrainerManager.Log.LogInfo("[Trainer] All reset to base");
+    }
+
+    // ── 便捷方法 ──
+    private void S(string f, string cn, string en, AttrType t) => AddAttr(f, cn, en, t, SaveStatus.Saved);
+    private void N(string f, string cn, string en, AttrType t) => AddAttr(f, cn, en, t, SaveStatus.NotSaved);
+
+    private void AddAttr(string field, string cn, string en, AttrType type, SaveStatus save)
+    {
+        _attrs.Add(new AttrEntry(field, cn, en, type, save,
+            p => ReadField(p, field, type),
+            (p, v) => WriteField(p, field, type, v)));
+    }
 
     private void TryAddTalentAttrs()
     {
         try
         {
-            var talentType = typeof(PlayerManager).Assembly.GetType("TalentManager");
-            if (talentType == null) return;
-            var instProp = talentType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
-            if (instProp == null) instProp = talentType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            _talentMgr = instProp?.GetValue(null);
-            if (_talentMgr == null) return;
-
-            var pHaveField = talentType.GetField("P_Have", BindingFlags.Public | BindingFlags.Instance);
-            var pBaseField = talentType.GetField("P_Base", BindingFlags.Public | BindingFlags.Instance);
-
-            if (pHaveField != null)
-                _attrs.Add(new AttrEntry("Talent_P_Have", "可用天赋点", "Talent Pts", AttrType.Int, SaveStatus.Saved,
-                    _ => SafeReadInt(_talentMgr, pHaveField), (_, v) => false));
-
-            if (pBaseField != null)
-                _attrs.Add(new AttrEntry("Talent_P_Base", "天赋点(基础)", "Talent Base", AttrType.Int, SaveStatus.Saved,
-                    _ => SafeReadInt(_talentMgr, pBaseField), (_, v) => false));
+            var t = typeof(PlayerManager).Assembly.GetType("TalentManager");
+            if (t == null) return;
+            var ip = t.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+                  ?? t.GetProperty("Instance", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            var inst = ip?.GetValue(null);
+            if (inst == null) return;
+            var hf = t.GetField("P_Have", BindingFlags.Public | BindingFlags.Instance);
+            var bf = t.GetField("P_Base", BindingFlags.Public | BindingFlags.Instance);
+            if (hf != null) _attrs.Add(new AttrEntry("Talent_P_Have", "可用天赋点", "Talent Pts", AttrType.Int, SaveStatus.Saved,
+                _ => SafeRead(inst, hf), (_, v) => false));
+            if (bf != null) _attrs.Add(new AttrEntry("Talent_P_Base", "天赋点(基础)", "Talent Base", AttrType.Int, SaveStatus.Saved,
+                _ => SafeRead(inst, bf), (_, v) => false));
         }
-        catch (Exception e)
-        {
-            TrainerManager.Log.LogWarning("[Trainer] TalentManager access failed: " + e.Message);
-        }
+        catch { }
     }
 
     private void TryAddMoneyAttr()
     {
         try
         {
-            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
-            if (saveMgrType == null) return;
-            var instProp = saveMgrType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
-            if (instProp == null) instProp = saveMgrType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            _saveMgr = instProp?.GetValue(null);
-            if (_saveMgr == null) return;
-
-            var runtimeDataProp = saveMgrType.GetProperty("RuntimeData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var runtimeData = runtimeDataProp?.GetValue(_saveMgr);
-            if (runtimeData == null) return;
-
-            var invDataProp = runtimeData.GetType().GetProperty("InventoryData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var invData = invDataProp?.GetValue(runtimeData);
-            if (invData == null) return;
-
-            var moneyField = invData.GetType().GetField("Money",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (moneyField == null) return;
-
-            var invDataRef = invData;
-            var moneyFieldRef = moneyField;
-
+            var st = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (st == null) return;
+            var ip = st.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+                  ?? st.GetProperty("Instance", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            var sm = ip?.GetValue(null);
+            if (sm == null) return;
+            var rd = st.GetProperty("RuntimeData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(sm);
+            if (rd == null) return;
+            var inv = rd.GetType().GetProperty("InventoryData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(rd);
+            if (inv == null) return;
+            var mf = inv.GetType().GetField("Money", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (mf == null) return;
+            var iref = inv; var mref = mf;
             _attrs.Add(new AttrEntry("Money", "金币", "Gold", AttrType.Long, SaveStatus.Saved,
-                _ =>
-                {
-                    try { return moneyFieldRef.GetValue(invDataRef)?.ToString() ?? "0"; }
-                    catch { return "0"; }
-                },
-                (_, v) =>
-                {
-                    try
-                    {
-                        if (long.TryParse(v, out var m)) { moneyFieldRef.SetValue(invDataRef, m); return true; }
-                    }
-                    catch { }
-                    return false;
-                }));
+                _ => { try { return mref.GetValue(iref)?.ToString() ?? "0"; } catch { return "0"; } },
+                (_, v) => { try { if (long.TryParse(v, out var m)) { mref.SetValue(iref, m); return true; } } catch { } return false; }));
         }
-        catch (Exception e)
-        {
-            TrainerManager.Log.LogWarning("[Trainer] SaveManager access failed: " + e.Message);
-        }
+        catch { }
     }
 
-    private static string SafeReadInt(object obj, FieldInfo f)
-    {
-        try { return f.GetValue(obj)?.ToString() ?? "0"; }
-        catch { return "0"; }
-    }
-
-    /// <summary>
-    /// 刷新当前值显示，并把原始值同步为当前状态。
-    /// 这样「恢复原始值」会恢复到你刷新那一刻的状态（包含升级/换装备后的值）。
-    /// </summary>
-    private void RefreshCurrentDisplayOnly()
-    {
-        if (_player == null) return;
-        var fresh = FindObjectOfType<PlayerManager>();
-        if (fresh != null) _player = fresh;
-        // 强制更新原始值为当前状态（包含升级/换装备后的值）
-        RefreshCurrentValuesForceOriginal();
-        TrainerManager.Log.LogInfo("[Trainer] Current values refreshed, originals updated to current state");
-    }
-
-    /// <summary>
-    /// 刷新输入框 + 强制覆盖原始值为当前值（用于刷新按钮）。
-    /// </summary>
-    private void RefreshCurrentValuesForceOriginal()
-    {
-        if (_player == null) return;
-        foreach (var attr in _attrs)
-        {
-            var val = attr.GetValue(_player);
-            _inputBuffers[attr.Key] = val;
-            _trueOriginalValues[attr.Key] = val;
-        }
-    }
-
-    private void RefreshCurrentValues(bool recordOriginal = false)
-    {
-        if (_player == null) return;
-        foreach (var attr in _attrs)
-        {
-            var val = attr.GetValue(_player);
-            _inputBuffers[attr.Key] = val;
-            // ⚠️ 原始值只捕获一次，之后永不覆盖
-            if (recordOriginal && !_originalCaptured)
-                _trueOriginalValues[attr.Key] = val;
-        }
-        if (recordOriginal) _originalCaptured = true;
-    }
-
-    private void ApplyAll()
-    {
-        if (_player == null) return;
-        foreach (var attr in _attrs)
-        {
-            if (_inputBuffers.TryGetValue(attr.Key, out var input))
-            {
-                var before = attr.GetValue(_player);
-                if (attr.TrySetValue(_player, input))
-                    _trueOriginalValues[attr.Key] = before;
-            }
-        }
-        TrainerManager.Log.LogInfo("[Trainer] All attributes applied (originals saved)");
-    }
-
-    private void ResetAll()
-    {
-        if (_player == null) return;
-        foreach (var attr in _attrs)
-        {
-            if (_trueOriginalValues.TryGetValue(attr.Key, out var orig))
-            {
-                _inputBuffers[attr.Key] = orig;
-                attr.TrySetValue(_player, orig);
-            }
-        }
-        TrainerManager.Log.LogInfo("[Trainer] All attributes reset to original");
-    }
-
-    /// <summary>
-    /// 恢复所有属性到首次扫描时的原始值（完全未修改的状态）。
-    /// </summary>
-    private void RestoreOriginal()
-    {
-        if (_player == null) return;
-        foreach (var attr in _attrs)
-        {
-            if (_trueOriginalValues.TryGetValue(attr.Key, out var orig))
-            {
-                _inputBuffers[attr.Key] = orig;
-                attr.TrySetValue(_player, orig);
-            }
-        }
-        TrainerManager.Log.LogInfo("[Trainer] All attributes restored to TRUE original (first scan)");
-    }
-
-    /// <summary>
-    /// 直接把 PlayerSaveData 中被修改的倍率字段设回默认值（1.0），
-    /// 然后重新初始化 PlayerManager。这会保留等级/装备/金币等进度。
-    /// </summary>
-    private void RecalcStats()
-    {
-        if (_player == null) return;
-        try
-        {
-            // 获取 PlayerSaveData
-            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
-            if (saveMgrType == null) { TrainerManager.Log.LogWarning("[Trainer] SaveManager type not found"); return; }
-            var instProp = saveMgrType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
-                ?? saveMgrType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            var saveMgr = instProp?.GetValue(null);
-            if (saveMgr == null) { TrainerManager.Log.LogWarning("[Trainer] SaveManager.Instance is null"); return; }
-
-            var runtimeData = saveMgrType.GetProperty("RuntimeData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(saveMgr);
-            if (runtimeData == null) { TrainerManager.Log.LogWarning("[Trainer] RuntimeData is null"); return; }
-
-            var playerData = runtimeData.GetType().GetProperty("PlayerData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(runtimeData);
-            if (playerData == null) { TrainerManager.Log.LogWarning("[Trainer] PlayerData is null"); return; }
-
-            var psdType = playerData.GetType();
-            int resetCount = 0;
-
-            // 把所有 Bei（倍率）字段设回 1.0
-            string[] beiFields = { "Health_Bei", "Mana_Bei", "Damage_Bei", "MVSpeed_Bei", "ATSpeed_Bei",
-                                   "FireDamage_Bei", "FrozenDamage_Bei", "ThunderDamage_Bei",
-                                   "PoisonDamage_Bei", "PhysicsDamage_Bei", "ShadowDamage_Bei" };
-            foreach (var fname in beiFields)
-            {
-                var f = psdType.GetField(fname, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (f != null && f.FieldType == typeof(float))
-                {
-                    f.SetValue(playerData, 1f);
-                    resetCount++;
-                }
-            }
-
-            // 把百分比字段设回 0
-            string[] pctFields = { "Health_Percent", "Mana_Percent", "Damage_Anti", "GeDang",
-                                   "BJrate", "BJDamage", "JYrate", "CoolDown" };
-            foreach (var fname in pctFields)
-            {
-                var f = psdType.GetField(fname, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (f != null && f.FieldType == typeof(float))
-                {
-                    f.SetValue(playerData, 0f);
-                    resetCount++;
-                }
-            }
-
-            // 用重置后的 PlayerSaveData 重新初始化
-            var initMethod = typeof(PlayerManager).GetMethod("InitFromSaveData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            initMethod?.Invoke(_player, new object[] { playerData });
-
-            var afterMethod = typeof(PlayerManager).GetMethod("InitializeAfterSaveRestore",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            afterMethod?.Invoke(_player, null);
-
-            var refreshMethod = typeof(PlayerManager).GetMethod("RefreshRuntimeDerivedStats",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            refreshMethod?.Invoke(_player, null);
-
-            RefreshCurrentValues(false);
-            TrainerManager.Log.LogInfo(string.Format("[Trainer] Reset {0} fields in PlayerSaveData, re-initialized", resetCount));
-        }
-        catch (Exception e)
-        {
-            TrainerManager.Log.LogWarning("[Trainer] RecalcStats failed: " + e.Message);
-        }
-    }
-
-    private void AddAttr(string field, string nameCN, string nameEN, AttrType type, SaveStatus save)
-    {
-        _attrs.Add(new AttrEntry(field, nameCN, nameEN, type, save,
-            p => ReadField(p, field, type),
-            (p, v) => WriteField(p, field, type, v)));
-    }
+    private static string SafeRead(object o, FieldInfo f) { try { return f.GetValue(o)?.ToString() ?? "0"; } catch { return "0"; } }
 
     private static string ReadField(PlayerManager p, string field, AttrType type)
     {
         try
         {
-            var f = typeof(PlayerManager).GetField(field,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var f = typeof(PlayerManager).GetField(field, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (f == null) return "?";
-            var val = f.GetValue(p);
+            var v = f.GetValue(p);
             return type switch
             {
-                AttrType.Int => ((int)val).ToString(),
-                AttrType.Long => ((long)val).ToString(),
-                AttrType.Float => ((float)val).ToString("F2"),
-                AttrType.Bool => ((bool)val).ToString(),
-                _ => val?.ToString() ?? "?"
+                AttrType.Int => ((int)v).ToString(),
+                AttrType.Long => ((long)v).ToString(),
+                AttrType.Float => ((float)v).ToString("F2"),
+                AttrType.Bool => ((bool)v).ToString(),
+                _ => v?.ToString() ?? "?"
             };
         }
         catch { return "?"; }
@@ -587,10 +362,9 @@ public class TrainerBehaviour : MonoBehaviour
     {
         try
         {
-            var f = typeof(PlayerManager).GetField(field,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var f = typeof(PlayerManager).GetField(field, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (f == null) return false;
-            object? boxed = type switch
+            object? b = type switch
             {
                 AttrType.Int => int.TryParse(value, out var iv) ? iv : null,
                 AttrType.Long => long.TryParse(value, out var lv) ? lv : null,
@@ -598,8 +372,8 @@ public class TrainerBehaviour : MonoBehaviour
                 AttrType.Bool => bool.TryParse(value, out var bv) ? bv : null,
                 _ => null
             };
-            if (boxed == null) return false;
-            f.SetValue(p, boxed);
+            if (b == null) return false;
+            f.SetValue(p, b);
             return true;
         }
         catch { return false; }
@@ -616,17 +390,11 @@ public class AttrEntry
     private readonly Func<PlayerManager, string> _getter;
     private readonly Func<PlayerManager, string, bool> _setter;
 
-    public AttrEntry(string key, string nameCN, string nameEN, AttrType type, SaveStatus save,
-        Func<PlayerManager, string> getter,
-        Func<PlayerManager, string, bool> setter)
+    public AttrEntry(string key, string cn, string en, AttrType type, SaveStatus save,
+        Func<PlayerManager, string> getter, Func<PlayerManager, string, bool> setter)
     {
-        Key = key;
-        NameCN = nameCN;
-        NameEN = nameEN;
-        Type = type;
-        Save = save;
-        _getter = getter;
-        _setter = setter;
+        Key = key; NameCN = cn; NameEN = en; Type = type; Save = save;
+        _getter = getter; _setter = setter;
     }
 
     public string GetValue(PlayerManager p) => _getter(p);
