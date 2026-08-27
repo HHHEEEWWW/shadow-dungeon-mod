@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using BepInEx.Logging;
 using UnityEngine;
@@ -37,16 +38,14 @@ public static class TrainerManager
 public class TrainerBehaviour : MonoBehaviour
 {
     private bool _showPanel;
-    private bool _useChinese = true;  // 默认中文
+    private bool _useChinese = true;
     private Vector2 _scrollPos;
     private readonly List<AttrEntry> _attrs = new();
     private PlayerManager? _player;
 
-    // 输入缓冲 & 原始值
     private readonly Dictionary<string, string> _inputBuffers = new();
     private readonly Dictionary<string, string> _originalValues = new();
 
-    // 缓存的单例引用（通过反射获取）
     private object? _talentMgr;
     private object? _saveMgr;
 
@@ -57,18 +56,16 @@ public class TrainerBehaviour : MonoBehaviour
             _showPanel = !_showPanel;
             if (_showPanel) RefreshPlayerAndAttrs();
         }
-        // 不再自动刷新——避免覆盖用户正在输入的内容
-        // 用户需要刷新时手动点「重新扫描属性」
     }
 
     private void OnGUI()
     {
         if (!_showPanel) return;
 
-        var panelRect = new Rect(20, 20, 720, Screen.height - 40);
+        var panelRect = new Rect(20, 20, 760, Screen.height - 40);
         GUI.Box(panelRect, "");
 
-        // 标题 + 中英切换按钮
+        // 标题 + 中英切换
         var titleStyle = new GUIStyle(GUI.skin.label)
         {
             fontSize = 18,
@@ -76,11 +73,10 @@ public class TrainerBehaviour : MonoBehaviour
             alignment = TextAnchor.MiddleCenter
         };
         string title = _useChinese ? "Shadow Dungeon 修改器 (Home 切换)" : "Shadow Dungeon TRAINER (Home toggle)";
-        GUI.Label(new Rect(20, 25, 600, 30), title, titleStyle);
+        GUI.Label(new Rect(20, 25, 640, 30), title, titleStyle);
 
-        // 中/EN 切换按钮
         string langBtn = _useChinese ? "EN" : "中";
-        if (GUI.Button(new Rect(660, 28, 60, 26), langBtn))
+        if (GUI.Button(new Rect(680, 28, 60, 26), langBtn))
             _useChinese = !_useChinese;
 
         if (_player == null)
@@ -94,9 +90,9 @@ public class TrainerBehaviour : MonoBehaviour
         }
 
         // 按钮栏
-        GUILayout.BeginArea(new Rect(25, 60, 690, 35));
+        GUILayout.BeginArea(new Rect(25, 60, 720, 35));
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button(_useChinese ? "刷新当前值" : "Refresh Values", GUILayout.Width(120)))
+        if (GUILayout.Button(_useChinese ? "刷新当前值" : "Refresh", GUILayout.Width(100)))
             RefreshCurrentDisplayOnly();
         if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(100)))
             ApplyAll();
@@ -111,58 +107,79 @@ public class TrainerBehaviour : MonoBehaviour
         float headerY = 98;
         var headerStyle = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold };
         GUI.Label(new Rect(25, headerY, 200, 20), _useChinese ? "属性名" : "Attribute", headerStyle);
-        GUI.Label(new Rect(225, headerY, 120, 20), _useChinese ? "当前值" : "Current", headerStyle);
-        GUI.Label(new Rect(345, headerY, 150, 20), _useChinese ? "修改值" : "New Value", headerStyle);
-        GUI.Label(new Rect(500, headerY, 60, 20), "OK", headerStyle);
-        GUI.Label(new Rect(570, headerY, 60, 20), _useChinese ? "重置" : "Reset", headerStyle);
+        GUI.Label(new Rect(225, headerY, 100, 20), _useChinese ? "当前值" : "Current", headerStyle);
+        GUI.Label(new Rect(325, headerY, 130, 20), _useChinese ? "修改值" : "New Value", headerStyle);
+        GUI.Label(new Rect(465, headerY, 50, 20), "OK", headerStyle);
+        GUI.Label(new Rect(525, headerY, 50, 20), _useChinese ? "重置" : "Reset", headerStyle);
 
-        // 滚动属性列表
+        // 滚动区域
         _scrollPos = GUI.BeginScrollView(
-            new Rect(25, 120, 690, panelRect.height - 140),
+            new Rect(25, 120, 730, panelRect.height - 140),
             _scrollPos,
-            new Rect(0, 0, 660, _attrs.Count * 32 + 10));
+            new Rect(0, 0, 700, _attrs.Count * 32 + 60));
 
         float y = 5;
-        foreach (var attr in _attrs)
+
+        // ── 分组：先画「退出保存」的属性 ──
+        var savedAttrs = _attrs.Where(a => a.Save == SaveStatus.Saved).ToList();
+        var notSavedAttrs = _attrs.Where(a => a.Save == SaveStatus.NotSaved).ToList();
+
+        if (savedAttrs.Count > 0)
         {
-            DrawAttrRow(ref y, attr);
+            DrawSectionHeader(ref y, _useChinese ? "✅ 退出后保存" : "✅ Persists after exit");
+            foreach (var attr in savedAttrs)
+                DrawAttrRow(ref y, attr);
+        }
+
+        if (notSavedAttrs.Count > 0)
+        {
+            DrawSectionHeader(ref y, _useChinese ? "⚠️ 退出后重置（当前生效）" : "⚠️ Resets on exit (current session only)");
+            foreach (var attr in notSavedAttrs)
+                DrawAttrRow(ref y, attr);
         }
 
         GUI.EndScrollView();
     }
 
+    private void DrawSectionHeader(ref float y, string text)
+    {
+        var style = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 13,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = new Color(0.8f, 0.9f, 1f) }
+        };
+        GUI.Label(new Rect(0, y, 600, 24), text, style);
+        y += 26;
+    }
+
     private void DrawAttrRow(ref float y, AttrEntry attr)
     {
         const float labelW = 200;
-        const float valueW = 120;
-        const float inputW = 150;
-        const float btnW = 60;
+        const float valueW = 100;
+        const float inputW = 130;
+        const float btnW = 50;
         const float rowH = 28;
         const float gap = 4;
 
-        // 属性名（根据语言切换）
         string displayName = _useChinese ? attr.NameCN : attr.NameEN;
         GUI.Label(new Rect(0, y, labelW, rowH), displayName);
 
-        // 当前值
         var currentVal = attr.GetValue(_player!);
         GUI.Label(new Rect(labelW, y, valueW, rowH), currentVal);
 
-        // 输入框
         if (!_inputBuffers.ContainsKey(attr.Key))
             _inputBuffers[attr.Key] = currentVal;
         _inputBuffers[attr.Key] = GUI.TextField(
             new Rect(labelW + valueW, y, inputW, rowH),
             _inputBuffers[attr.Key]);
 
-        // OK 按钮
         if (GUI.Button(new Rect(labelW + valueW + inputW + gap, y, btnW, rowH), "OK"))
         {
             if (attr.TrySetValue(_player!, _inputBuffers[attr.Key]))
                 TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} -> {1}", displayName, _inputBuffers[attr.Key]));
         }
 
-        // 重置按钮
         string resetLabel = _useChinese ? "重置" : "Reset";
         if (GUI.Button(new Rect(labelW + valueW + inputW + gap * 2 + btnW, y, btnW, rowH), resetLabel))
         {
@@ -190,75 +207,87 @@ public class TrainerBehaviour : MonoBehaviour
         _inputBuffers.Clear();
         _originalValues.Clear();
 
-        // ── 基础属性 ──
-        AddAttr("Health",           "生命值",     "HP",              AttrType.Float);
-        AddAttr("Mana",             "法力值",     "MP",              AttrType.Float);
-        AddAttr("Level",            "等级",       "Level",           AttrType.Int);
-        AddAttr("Xp_Total",         "总经验值",   "Total XP",        AttrType.Float);
-        AddAttr("Xp_CurrentLevel",  "当前等级经验","Level XP",       AttrType.Float);
+        // ══════════════════════════════════════════
+        //  ✅ 退出后保存的属性
+        // ══════════════════════════════════════════
 
-        // ── 攻击 ──
-        AddAttr("Damage_Base",      "基础攻击力",  "ATK Base",       AttrType.Float);
-        AddAttr("Damage_Bei",       "攻击倍率",    "ATK Multiplier", AttrType.Float);
-        AddAttr("Damage_Anti",      "伤害减免",    "DMG Reduction",  AttrType.Float);
+        // 基础
+        S("Health",           "生命值",       "HP",              AttrType.Float);
+        S("Mana",             "法力值",       "MP",              AttrType.Float);
+        S("Level",            "等级",         "Level",           AttrType.Int);
+        S("Xp_Total",         "总经验值",     "Total XP",        AttrType.Float);
+        S("Xp_CurrentLevel",  "当前等级经验",  "Level XP",       AttrType.Float);
 
-        // ── 速度 ──
-        AddAttr("MVSpeed_Base",     "移动速度基础","Move Speed Base",AttrType.Float);
-        AddAttr("MVSpeed_Bei",      "移动速度倍率","Move Speed Mult",AttrType.Float);
-        AddAttr("ATSpeed_Base",     "攻击速度基础","ATK Speed Base", AttrType.Float);
-        AddAttr("ATSpeed_Bei",      "攻击速度倍率","ATK Speed Mult", AttrType.Float);
+        // 倍率（存档中，加载不被覆盖）
+        S("Damage_Bei",       "攻击倍率",     "ATK Mult",        AttrType.Float);
+        S("Damage_Anti",      "伤害减免",     "DMG Reduction",   AttrType.Float);
+        S("MVSpeed_Bei",      "移动速度倍率",  "Move Spd Mult",  AttrType.Float);
+        S("ATSpeed_Bei",      "攻击速度倍率",  "ATK Spd Mult",   AttrType.Float);
+        S("Health_Bei",       "生命倍率",     "HP Mult",         AttrType.Float);
+        S("Health_Percent",   "生命百分比",   "HP Percent",      AttrType.Float);
+        S("Mana_Bei",         "法力倍率",     "MP Mult",         AttrType.Float);
+        S("Mana_Percent",     "法力百分比",   "MP Percent",      AttrType.Float);
 
-        // ── 暴击/穿透 ──
-        AddAttr("BJrate",           "暴击率",     "Crit Rate",       AttrType.Float);
-        AddAttr("BJDamage",         "暴击伤害",   "Crit Damage",     AttrType.Float);
-        AddAttr("JYrate",           "穿透率",     "Penetration",     AttrType.Float);
-        AddAttr("GeDang",           "格挡",       "Block",           AttrType.Float);
+        // 暴击/穿透/格挡
+        S("BJrate",           "暴击率",       "Crit Rate",       AttrType.Float);
+        S("BJDamage",         "暴击伤害",     "Crit Damage",     AttrType.Float);
+        S("JYrate",           "穿透率",       "Penetration",     AttrType.Float);
+        S("GeDang",           "格挡",         "Block",           AttrType.Float);
 
-        // ── 生命/法力倍率 ──
-        AddAttr("Health_Bei",       "生命倍率",   "HP Multiplier",   AttrType.Float);
-        AddAttr("Health_Percent",   "生命百分比", "HP Percent",      AttrType.Float);
-        AddAttr("Mana_Bei",         "法力倍率",   "MP Multiplier",   AttrType.Float);
-        AddAttr("Mana_Percent",     "法力百分比", "MP Percent",      AttrType.Float);
+        // 元素倍率/穿透/抗性
+        S("FireDamage_Bei",   "火伤倍率",     "Fire DMG Mult",   AttrType.Float);
+        S("FrozenDamage_Bei", "冰伤倍率",     "Ice DMG Mult",    AttrType.Float);
+        S("ThunderDamage_Bei","雷伤倍率",     "Thunder DMG Mult",AttrType.Float);
+        S("PoisonDamage_Bei", "毒伤倍率",     "Poison DMG Mult", AttrType.Float);
+        S("PhysicsDamage_Bei","物理伤倍率",   "Phys DMG Mult",   AttrType.Float);
+        S("ShadowDamage_Bei", "暗影伤倍率",   "Shadow DMG Mult", AttrType.Float);
 
-        // ── 元素伤害倍率 ──
-        AddAttr("FireDamage_Bei",   "火伤倍率",   "Fire DMG Mult",   AttrType.Float);
-        AddAttr("FrozenDamage_Bei", "冰伤倍率",   "Ice DMG Mult",    AttrType.Float);
-        AddAttr("ThunderDamage_Bei","雷伤倍率",   "Thunder DMG Mult",AttrType.Float);
-        AddAttr("PoisonDamage_Bei", "毒伤倍率",   "Poison DMG Mult", AttrType.Float);
-        AddAttr("PhysicsDamage_Bei","物理伤倍率", "Phys DMG Mult",   AttrType.Float);
-        AddAttr("ShadowDamage_Bei", "暗影伤倍率", "Shadow DMG Mult", AttrType.Float);
+        S("FireChuan",        "火穿透",       "Fire Pen",        AttrType.Float);
+        S("FrozenChuan",      "冰穿透",       "Ice Pen",         AttrType.Float);
+        S("ThunderChuan",     "雷穿透",       "Thunder Pen",     AttrType.Float);
+        S("PoisonChuan",      "毒穿透",       "Poison Pen",      AttrType.Float);
+        S("PhysicsChuan",     "物理穿透",     "Phys Pen",        AttrType.Float);
+        S("ShadowChuan",      "暗影穿透",     "Shadow Pen",      AttrType.Float);
 
-        // ── 元素穿透 ──
-        AddAttr("FireChuan",        "火穿透",     "Fire Pen",        AttrType.Float);
-        AddAttr("FrozenChuan",      "冰穿透",     "Ice Pen",         AttrType.Float);
-        AddAttr("ThunderChuan",     "雷穿透",     "Thunder Pen",     AttrType.Float);
-        AddAttr("PoisonChuan",      "毒穿透",     "Poison Pen",      AttrType.Float);
-        AddAttr("PhysicsChuan",     "物理穿透",   "Phys Pen",        AttrType.Float);
-        AddAttr("ShadowChuan",      "暗影穿透",   "Shadow Pen",      AttrType.Float);
+        S("FireAnti",         "火抗",         "Fire Res",        AttrType.Float);
+        S("FrozenAnti",       "冰抗",         "Ice Res",         AttrType.Float);
+        S("ThunderAnti",      "雷抗",         "Thunder Res",     AttrType.Float);
+        S("PoisonAnti",       "毒抗",         "Poison Res",      AttrType.Float);
+        S("PhysicsAnti",      "物抗",         "Phys Res",        AttrType.Float);
+        S("ShadowAnti",       "暗影抗",       "Shadow Res",      AttrType.Float);
 
-        // ── 元素抗性 ──
-        AddAttr("FireAnti",         "火抗",       "Fire Res",        AttrType.Float);
-        AddAttr("FrozenAnti",       "冰抗",       "Ice Res",         AttrType.Float);
-        AddAttr("ThunderAnti",      "雷抗",       "Thunder Res",     AttrType.Float);
-        AddAttr("PoisonAnti",       "毒抗",       "Poison Res",      AttrType.Float);
-        AddAttr("PhysicsAnti",      "物抗",       "Phys Res",        AttrType.Float);
-        AddAttr("ShadowAnti",       "暗影抗",     "Shadow Res",      AttrType.Float);
+        // 其他
+        S("CoolDown",         "冷却缩减",     "CD Reduction",    AttrType.Float);
+        S("ItemDrop_Rate",    "掉落率",       "Drop Rate",       AttrType.Float);
+        S("EXP_Range",        "经验范围",     "EXP Range",       AttrType.Float);
 
-        // ── 掉落/冷却 ──
-        AddAttr("ItemDrop_Rate",    "掉落率",     "Drop Rate",       AttrType.Float);
-        AddAttr("EXP_Range",        "经验范围",   "EXP Range",       AttrType.Float);
-        AddAttr("CoolDown",         "冷却缩减",   "CD Reduction",    AttrType.Float);
-
-        // ── 天赋点（通过反射获取单例） ──
-        TryAddTalentAttrs();
-
-        // ── 金币（通过反射获取单例） ──
+        // 金币
         TryAddMoneyAttr();
 
-        // 记录原始值
+        // 天赋点
+        TryAddTalentAttrs();
+
+        // ══════════════════════════════════════════
+        //  ⚠️ 退出后重置的属性（当前生效）
+        // ══════════════════════════════════════════
+
+        N("Damage_Base",      "基础攻击力",    "ATK Base",       AttrType.Float);
+        N("MVSpeed_Base",     "移动速度基础",  "Move Spd Base",  AttrType.Float);
+        N("ATSpeed_Base",     "攻击速度基础",  "ATK Spd Base",   AttrType.Float);
+
         RefreshCurrentValues(true);
-        TrainerManager.Log.LogInfo(string.Format("[Trainer] Found PlayerManager, {0} attributes registered", _attrs.Count));
+        TrainerManager.Log.LogInfo(string.Format("[Trainer] Found PlayerManager, {0} attributes ({1} saved, {2} temp)",
+            _attrs.Count,
+            _attrs.Count(a => a.Save == SaveStatus.Saved),
+            _attrs.Count(a => a.Save == SaveStatus.NotSaved)));
     }
+
+    // ── 便捷方法：保存/不保存 ──
+    private void S(string field, string cn, string en, AttrType type) =>
+        AddAttr(field, cn, en, type, SaveStatus.Saved);
+
+    private void N(string field, string cn, string en, AttrType type) =>
+        AddAttr(field, cn, en, type, SaveStatus.NotSaved);
 
     private void TryAddTalentAttrs()
     {
@@ -277,14 +306,12 @@ public class TrainerBehaviour : MonoBehaviour
             var pBaseField = talentType.GetField("P_Base", BindingFlags.Public | BindingFlags.Instance);
 
             if (pHaveField != null)
-                _attrs.Add(new AttrEntry("Talent_P_Have", "可用天赋点", "Talent Pts", AttrType.Int,
-                    _ => SafeReadInt(_talentMgr, pHaveField),
-                    (_, v) => false));
+                _attrs.Add(new AttrEntry("Talent_P_Have", "可用天赋点", "Talent Pts", AttrType.Int, SaveStatus.Saved,
+                    _ => SafeReadInt(_talentMgr, pHaveField), (_, v) => false));
 
             if (pBaseField != null)
-                _attrs.Add(new AttrEntry("Talent_P_Base", "天赋点(基础)", "Talent Base", AttrType.Int,
-                    _ => SafeReadInt(_talentMgr, pBaseField),
-                    (_, v) => false));
+                _attrs.Add(new AttrEntry("Talent_P_Base", "天赋点(基础)", "Talent Base", AttrType.Int, SaveStatus.Saved,
+                    _ => SafeReadInt(_talentMgr, pBaseField), (_, v) => false));
         }
         catch (Exception e)
         {
@@ -322,7 +349,7 @@ public class TrainerBehaviour : MonoBehaviour
             var invDataRef = invData;
             var moneyFieldRef = moneyField;
 
-            _attrs.Add(new AttrEntry("Money", "金币", "Gold", AttrType.Long,
+            _attrs.Add(new AttrEntry("Money", "金币", "Gold", AttrType.Long, SaveStatus.Saved,
                 _ =>
                 {
                     try { return moneyFieldRef.GetValue(invDataRef)?.ToString() ?? "0"; }
@@ -332,11 +359,7 @@ public class TrainerBehaviour : MonoBehaviour
                 {
                     try
                     {
-                        if (long.TryParse(v, out var m))
-                        {
-                            moneyFieldRef.SetValue(invDataRef, m);
-                            return true;
-                        }
+                        if (long.TryParse(v, out var m)) { moneyFieldRef.SetValue(invDataRef, m); return true; }
                     }
                     catch { }
                     return false;
@@ -354,6 +377,14 @@ public class TrainerBehaviour : MonoBehaviour
         catch { return "0"; }
     }
 
+    private void RefreshCurrentDisplayOnly()
+    {
+        if (_player == null) return;
+        var fresh = FindObjectOfType<PlayerManager>();
+        if (fresh != null) _player = fresh;
+        TrainerManager.Log.LogInfo("[Trainer] Current values refreshed");
+    }
+
     private void RefreshCurrentValues(bool recordOriginal = false)
     {
         if (_player == null) return;
@@ -361,8 +392,7 @@ public class TrainerBehaviour : MonoBehaviour
         {
             var val = attr.GetValue(_player);
             _inputBuffers[attr.Key] = val;
-            if (recordOriginal)
-                _originalValues[attr.Key] = val;
+            if (recordOriginal) _originalValues[attr.Key] = val;
         }
     }
 
@@ -391,22 +421,9 @@ public class TrainerBehaviour : MonoBehaviour
         TrainerManager.Log.LogInfo("[Trainer] All attributes reset to original");
     }
 
-    /// <summary>
-    /// 只刷新"当前值"列的显示，不触碰用户输入框和原始值。
-    /// </summary>
-    private void RefreshCurrentDisplayOnly()
+    private void AddAttr(string field, string nameCN, string nameEN, AttrType type, SaveStatus save)
     {
-        if (_player == null) return;
-        // 重新获取 PlayerManager 实例（可能场景切换后变了）
-        var fresh = FindObjectOfType<PlayerManager>();
-        if (fresh != null) _player = fresh;
-        // 不清空 _inputBuffers 和 _originalValues——用户正在输入的内容保留
-        TrainerManager.Log.LogInfo("[Trainer] Current values refreshed");
-    }
-
-    private void AddAttr(string field, string nameCN, string nameEN, AttrType type)
-    {
-        _attrs.Add(new AttrEntry(field, nameCN, nameEN, type,
+        _attrs.Add(new AttrEntry(field, nameCN, nameEN, type, save,
             p => ReadField(p, field, type),
             (p, v) => WriteField(p, field, type, v)));
     }
@@ -460,10 +477,11 @@ public class AttrEntry
     public string NameCN { get; }
     public string NameEN { get; }
     public AttrType Type { get; }
+    public SaveStatus Save { get; }
     private readonly Func<PlayerManager, string> _getter;
     private readonly Func<PlayerManager, string, bool> _setter;
 
-    public AttrEntry(string key, string nameCN, string nameEN, AttrType type,
+    public AttrEntry(string key, string nameCN, string nameEN, AttrType type, SaveStatus save,
         Func<PlayerManager, string> getter,
         Func<PlayerManager, string, bool> setter)
     {
@@ -471,6 +489,7 @@ public class AttrEntry
         NameCN = nameCN;
         NameEN = nameEN;
         Type = type;
+        Save = save;
         _getter = getter;
         _setter = setter;
     }
@@ -479,10 +498,5 @@ public class AttrEntry
     public bool TrySetValue(PlayerManager p, string v) => _setter(p, v);
 }
 
-public enum AttrType
-{
-    Int,
-    Long,
-    Float,
-    Bool
-}
+public enum AttrType { Int, Long, Float, Bool }
+public enum SaveStatus { Saved, NotSaved }
