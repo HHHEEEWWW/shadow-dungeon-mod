@@ -55,6 +55,43 @@ public class TrainerBehaviour : MonoBehaviour
         }
     }
 
+    private void Awake()
+    {
+        // 多层保险：确保退出时必定重置
+        Application.wantsToQuit += OnWantsToQuit;
+    }
+
+    private void OnDestroy()
+    {
+        Application.wantsToQuit -= OnWantsToQuit;
+        DoReset();
+    }
+
+    private bool OnWantsToQuit()
+    {
+        DoReset();
+        return true; // 允许退出
+    }
+
+    private void OnApplicationQuit()
+    {
+        DoReset();
+    }
+
+    /// <summary>
+    /// 重置所有属性：当前值 - delta → 消除修改器影响。
+    /// 多个退出路径都会调用此方法，确保必定执行。
+    /// </summary>
+    private void DoReset()
+    {
+        if (_player == null || _deltaFloat.Count == 0) return;
+        foreach (var a in _attrs)
+        {
+            a.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
+        }
+        TrainerManager.Log.LogInfo("[Trainer] EXIT RESET: all attrs restored to clean state");
+    }
+
     private void OnGUI()
     {
         if (!_showPanel) return;
@@ -148,23 +185,21 @@ public class TrainerBehaviour : MonoBehaviour
             _inputBuffers[attr.Key] = current;
         _inputBuffers[attr.Key] = GUI.TextField(new Rect(LW + VW, y, IW, RH), _inputBuffers[attr.Key]);
 
-        // OK：delta += 新值 - 旧值，写入运行时 + 存档
+        // OK：delta += 新值 - 旧值
         if (GUI.Button(new Rect(LW + VW + IW + G, y, BW, RH), "OK"))
         {
             string oldStr = attr.GetValue(_player!);
             if (attr.TrySetValue(_player!, _inputBuffers[attr.Key]))
             {
                 attr.AccumulateDelta(_deltaFloat, _deltaInt, _deltaLong, oldStr, _inputBuffers[attr.Key]);
-                attr.WriteToSaveData(_inputBuffers[attr.Key]);
                 TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", name, oldStr, _inputBuffers[attr.Key]));
             }
         }
 
-        // 重置：当前值 - delta，写入运行时 + 存档
+        // 重置：当前值 - delta
         if (GUI.Button(new Rect(LW + VW + IW + G * 2 + BW, y, BW, RH), _useChinese ? "重置" : "Reset"))
         {
             attr.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
-            attr.WriteToSaveData(attr.GetValue(_player!));
             _inputBuffers[attr.Key] = attr.GetValue(_player!);
             TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset", name));
         }
@@ -242,10 +277,7 @@ public class TrainerBehaviour : MonoBehaviour
             {
                 string oldStr = a.GetValue(_player);
                 if (a.TrySetValue(_player, input))
-                {
                     a.AccumulateDelta(_deltaFloat, _deltaInt, _deltaLong, oldStr, input);
-                    a.WriteToSaveData(input);
-                }
             }
         }
         TrainerManager.Log.LogInfo("[Trainer] All applied");
@@ -257,9 +289,7 @@ public class TrainerBehaviour : MonoBehaviour
         foreach (var a in _attrs)
         {
             a.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
-            string val = a.GetValue(_player!);
-            a.WriteToSaveData(val);
-            _inputBuffers[a.Key] = val;
+            _inputBuffers[a.Key] = a.GetValue(_player!);
         }
         TrainerManager.Log.LogInfo("[Trainer] All reset");
     }
