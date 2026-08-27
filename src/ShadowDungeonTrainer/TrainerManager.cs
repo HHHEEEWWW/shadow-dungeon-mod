@@ -148,24 +148,25 @@ public class TrainerBehaviour : MonoBehaviour
             _inputBuffers[attr.Key] = current;
         _inputBuffers[attr.Key] = GUI.TextField(new Rect(LW + VW, y, IW, RH), _inputBuffers[attr.Key]);
 
-        // OK：delta += 新值 - 旧值
+        // OK：delta += 新值 - 旧值，写入运行时 + 存档
         if (GUI.Button(new Rect(LW + VW + IW + G, y, BW, RH), "OK"))
         {
             string oldStr = attr.GetValue(_player!);
             if (attr.TrySetValue(_player!, _inputBuffers[attr.Key]))
             {
                 attr.AccumulateDelta(_deltaFloat, _deltaInt, _deltaLong, oldStr, _inputBuffers[attr.Key]);
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2} (delta accumulated)", name, oldStr, _inputBuffers[attr.Key]));
+                attr.WriteToSaveData(_inputBuffers[attr.Key]);
+                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", name, oldStr, _inputBuffers[attr.Key]));
             }
         }
 
-        // 重置：当前值 - delta → 消除修改器影响
+        // 重置：当前值 - delta，写入运行时 + 存档
         if (GUI.Button(new Rect(LW + VW + IW + G * 2 + BW, y, BW, RH), _useChinese ? "重置" : "Reset"))
         {
             attr.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
-            // 更新输入框显示
+            attr.WriteToSaveData(attr.GetValue(_player!));
             _inputBuffers[attr.Key] = attr.GetValue(_player!);
-            TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset (delta subtracted)", name));
+            TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset", name));
         }
 
         y += RH + G;
@@ -241,10 +242,13 @@ public class TrainerBehaviour : MonoBehaviour
             {
                 string oldStr = a.GetValue(_player);
                 if (a.TrySetValue(_player, input))
+                {
                     a.AccumulateDelta(_deltaFloat, _deltaInt, _deltaLong, oldStr, input);
+                    a.WriteToSaveData(input);
+                }
             }
         }
-        TrainerManager.Log.LogInfo("[Trainer] All applied (delta accumulated)");
+        TrainerManager.Log.LogInfo("[Trainer] All applied");
     }
 
     private void ResetAll()
@@ -253,9 +257,11 @@ public class TrainerBehaviour : MonoBehaviour
         foreach (var a in _attrs)
         {
             a.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
-            _inputBuffers[a.Key] = a.GetValue(_player!);
+            string val = a.GetValue(_player!);
+            a.WriteToSaveData(val);
+            _inputBuffers[a.Key] = val;
         }
-        TrainerManager.Log.LogInfo("[Trainer] All reset (delta subtracted)");
+        TrainerManager.Log.LogInfo("[Trainer] All reset");
     }
 
     private void S(string f, string cn, string en, AttrType t) => AddAttr(f, cn, en, t, SaveStatus.Saved);
@@ -374,6 +380,42 @@ public class AttrEntry
 
     public string GetValue(PlayerManager p) => _getter(p);
     public bool TrySetValue(PlayerManager p, string v) => _setter(p, v);
+
+    /// <summary>
+    /// 同步写入 PlayerSaveData（持久化到存档），确保游戏重算时也用修改后的值。
+    /// </summary>
+    public void WriteToSaveData(string value)
+    {
+        try
+        {
+            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (saveMgrType == null) return;
+            var instProp = saveMgrType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+                ?? saveMgrType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            var sm = instProp?.GetValue(null);
+            if (sm == null) return;
+            var rd = saveMgrType.GetProperty("RuntimeData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(sm);
+            if (rd == null) return;
+            var pd = rd.GetType().GetProperty("PlayerData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(rd);
+            if (pd == null) return;
+            var f = pd.GetType().GetField(Key,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (f == null) return;
+            object? boxed = Type switch
+            {
+                AttrType.Int => int.TryParse(value, out var iv) ? iv : null,
+                AttrType.Long => long.TryParse(value, out var lv) ? lv : null,
+                AttrType.Float => float.TryParse(value, out var fv) ? fv : null,
+                _ => null
+            };
+            if (boxed != null) f.SetValue(pd, boxed);
+        }
+        catch { }
+    }
 
     /// <summary>
     /// 累计 delta：delta += (newVal - oldVal)
