@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using BepInEx.Logging;
+using HarmonyLib;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace ShadowDungeonTrainer;
 
@@ -23,6 +25,16 @@ public static class TrainerManager
         go.hideFlags = HideFlags.HideAndDontSave;
         go.AddComponent<TrainerBehaviour>();
         log.LogInfo("[Trainer] HUD created");
+    }
+
+    /// <summary>
+    /// Harmony 前缀：游戏保存前自动重置。静态方法供 Harmony 调用。
+    /// </summary>
+    public static bool SavePrefix()
+    {
+        var beh = UnityEngine.Object.FindObjectOfType<TrainerBehaviour>();
+        if (beh != null) beh.DoReset();
+        return true;
     }
 }
 
@@ -55,16 +67,67 @@ public class TrainerBehaviour : MonoBehaviour
         }
     }
 
+    // ── Harmony 前缀：游戏保存前自动重置 ──
+    // 静态方法，被 Harmony 调用
+    public static bool SavePrefix()
+    {
+        // 找到场景中的 TrainerBehaviour 并触发重置
+        var beh = FindObjectOfType<TrainerBehaviour>();
+        if (beh != null) beh.DoReset();
+        return true; // 允许原方法继续执行
+    }
+
     private void Awake()
     {
-        // 多层保险：确保退出时必定重置
+        // 多层保险：退出时重置
         Application.wantsToQuit += OnWantsToQuit;
+        SceneManager.sceneLoaded += OnSceneLoaded;
+
+        // Harmony 补丁：游戏保存前自动重置
+        PatchSaveMethods();
+    }
+
+    private void PatchSaveMethods()
+    {
+        try
+        {
+            var harmony = new Harmony("com.shadowdungeon.trainer");
+            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (saveMgrType != null)
+            {
+                foreach (var methodName in new[] { "SaveAndWaitIfNeeded", "SaveAndExitAndWaitIfNeeded", "SaveAndExitAfterCurrentSaveAsync" })
+                {
+                    var m = saveMgrType.GetMethod(methodName,
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (m != null)
+                    {
+                        harmony.Patch(m, prefix: new HarmonyMethod(typeof(TrainerManager).GetMethod(nameof(TrainerManager.SavePrefix), BindingFlags.Public | BindingFlags.Static)));
+                        TrainerManager.Log.LogInfo("[Trainer] Patched SaveManager." + methodName);
+                    }
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            TrainerManager.Log.LogWarning("[Trainer] Harmony patch failed: " + e.Message);
+        }
     }
 
     private void OnDestroy()
     {
         Application.wantsToQuit -= OnWantsToQuit;
+        SceneManager.sceneLoaded -= OnSceneLoaded;
         DoReset();
+    }
+
+    private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        // 场景切换后重置（比如返回主菜单）
+        DoReset();
+        // 清空 delta，新场景重新开始
+        _deltaFloat.Clear();
+        _deltaInt.Clear();
+        _deltaLong.Clear();
     }
 
     private bool OnWantsToQuit()
@@ -80,9 +143,9 @@ public class TrainerBehaviour : MonoBehaviour
 
     /// <summary>
     /// 重置所有属性：当前值 - delta → 消除修改器影响。
-    /// 多个退出路径都会调用此方法，确保必定执行。
+    /// 触发时机：退出游戏 / 返回主菜单 / 游戏保存 / 场景切换。
     /// </summary>
-    private void DoReset()
+    public void DoReset()
     {
         if (_player == null) return;
         // 检查所有三种 delta 类型，任一有值就执行重置
