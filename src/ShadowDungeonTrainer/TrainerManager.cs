@@ -183,8 +183,13 @@ public class TrainerBehaviour : MonoBehaviour
 
         if (GUI.Button(new Rect(labelW + valueW + inputW + gap, y, btnW, rowH), "OK"))
         {
+            // 应用前先记录当前值（这样"恢复原始值"能恢复到修改器改动前的状态）
+            var beforeApply = attr.GetValue(_player!);
             if (attr.TrySetValue(_player!, _inputBuffers[attr.Key]))
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} -> {1}", displayName, _inputBuffers[attr.Key]));
+            {
+                _trueOriginalValues[attr.Key] = beforeApply;
+                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", displayName, beforeApply, _inputBuffers[attr.Key]));
+            }
         }
 
         string resetLabel = _useChinese ? "重置" : "Reset";
@@ -412,9 +417,13 @@ public class TrainerBehaviour : MonoBehaviour
         foreach (var attr in _attrs)
         {
             if (_inputBuffers.TryGetValue(attr.Key, out var input))
-                attr.TrySetValue(_player, input);
+            {
+                var before = attr.GetValue(_player);
+                if (attr.TrySetValue(_player, input))
+                    _trueOriginalValues[attr.Key] = before;
+            }
         }
-        TrainerManager.Log.LogInfo("[Trainer] All attributes applied");
+        TrainerManager.Log.LogInfo("[Trainer] All attributes applied (originals saved)");
     }
 
     private void ResetAll()
