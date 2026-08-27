@@ -84,7 +84,11 @@ public class TrainerBehaviour : MonoBehaviour
     /// </summary>
     private void DoReset()
     {
-        if (_player == null || _deltaFloat.Count == 0) return;
+        if (_player == null) return;
+        // 检查所有三种 delta 类型，任一有值就执行重置
+        bool hasDelta = _deltaFloat.Count > 0 || _deltaInt.Count > 0 || _deltaLong.Count > 0;
+        if (!hasDelta) return;
+
         foreach (var a in _attrs)
         {
             a.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
@@ -410,42 +414,6 @@ public class AttrEntry
 
     public string GetValue(PlayerManager p) => _getter(p);
     public bool TrySetValue(PlayerManager p, string v) => _setter(p, v);
-
-    /// <summary>
-    /// 同步写入 PlayerSaveData（持久化到存档），确保游戏重算时也用修改后的值。
-    /// </summary>
-    public void WriteToSaveData(string value)
-    {
-        try
-        {
-            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
-            if (saveMgrType == null) return;
-            var instProp = saveMgrType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
-                ?? saveMgrType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            var sm = instProp?.GetValue(null);
-            if (sm == null) return;
-            var rd = saveMgrType.GetProperty("RuntimeData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(sm);
-            if (rd == null) return;
-            var pd = rd.GetType().GetProperty("PlayerData",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(rd);
-            if (pd == null) return;
-            var f = pd.GetType().GetField(Key,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (f == null) return;
-            object? boxed = Type switch
-            {
-                AttrType.Int => int.TryParse(value, out var iv) ? iv : null,
-                AttrType.Long => long.TryParse(value, out var lv) ? lv : null,
-                AttrType.Float => float.TryParse(value, out var fv) ? fv : null,
-                _ => null
-            };
-            if (boxed != null) f.SetValue(pd, boxed);
-        }
-        catch { }
-    }
 
     /// <summary>
     /// 累计 delta：delta += (newVal - oldVal)
