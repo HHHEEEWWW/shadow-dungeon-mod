@@ -34,9 +34,9 @@ public class TrainerBehaviour : MonoBehaviour
     private readonly List<AttrEntry> _attrs = new();
     private PlayerManager? _player;
 
-    // 核心：基准值（确认后的状态）+ 修改器值（用户输入的）
-    private readonly Dictionary<string, string> _baseValues = new();   // 基准 = 上一次确认的真实值
-    private readonly Dictionary<string, string> _inputBuffers = new(); // 修改器输入框
+    // 核心：基准值（上一次确认时的真实值）+ 修改器输入
+    private readonly Dictionary<string, string> _baseValues = new();
+    private readonly Dictionary<string, string> _inputBuffers = new();
 
     private GUIStyle? _labelStyle, _headerStyle, _titleStyle, _sectionStyle;
 
@@ -66,7 +66,6 @@ public class TrainerBehaviour : MonoBehaviour
         var panelRect = new Rect(20, 20, 780, Screen.height - 40);
         GUI.Box(panelRect, "");
 
-        // 标题
         string title = _useChinese ? "Shadow Dungeon 修改器 (Home 切换)" : "Shadow Dungeon TRAINER (Home toggle)";
         GUI.Label(new Rect(20, 25, 660, 35), title, _titleStyle);
         if (GUI.Button(new Rect(690, 28, 60, 26), _useChinese ? "EN" : "中"))
@@ -83,8 +82,6 @@ public class TrainerBehaviour : MonoBehaviour
         // 按钮栏
         GUILayout.BeginArea(new Rect(25, 62, 740, 36));
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button(_useChinese ? "刷新基准" : "Sync Base", GUILayout.Width(110)))
-            SyncBaseToCurrent();
         if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(100)))
             ApplyAll();
         if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(100)))
@@ -125,14 +122,12 @@ public class TrainerBehaviour : MonoBehaviour
         GUI.EndScrollView();
     }
 
-    // ── 分组标题 ──
     private void DrawSection(ref float y, string text)
     {
         GUI.Label(new Rect(0, y, 600, 28), text, _sectionStyle);
         y += 32;
     }
 
-    // ── 属性行 ──
     private void DrawRow(ref float y, AttrEntry attr)
     {
         const float LW = 220, VW = 110, IW = 140, BW = 55, RH = 32, G = 4;
@@ -140,6 +135,7 @@ public class TrainerBehaviour : MonoBehaviour
         string name = _useChinese ? attr.NameCN : attr.NameEN;
         GUI.Label(new Rect(0, y, LW, RH), name, _labelStyle);
 
+        // 当前值 = 游戏计算的真实值（如果没被修改器覆盖）或修改器值
         string current = attr.GetValue(_player!);
         GUI.Label(new Rect(LW, y, VW, RH), current, _labelStyle);
 
@@ -158,7 +154,7 @@ public class TrainerBehaviour : MonoBehaviour
             }
         }
 
-        // 重置：回到基准值
+        // 重置：回到基准值（改之前的状态）
         if (GUI.Button(new Rect(LW + VW + IW + G * 2 + BW, y, BW, RH), _useChinese ? "重置" : "Reset"))
         {
             if (_baseValues.TryGetValue(attr.Key, out var bas))
@@ -172,7 +168,6 @@ public class TrainerBehaviour : MonoBehaviour
         y += RH + G;
     }
 
-    // ── 全量扫描（首次进入 / 重新扫描）──
     private void FullScan()
     {
         _player = FindObjectOfType<PlayerManager>();
@@ -229,29 +224,13 @@ public class TrainerBehaviour : MonoBehaviour
         N("MVSpeed_Base",     "移动速度基础",  "Move Spd Base",  AttrType.Float);
         N("ATSpeed_Base",     "攻击速度基础",  "ATK Spd Base",   AttrType.Float);
 
-        // 基准值 = 当前真实值
+        // 基准 = 当前真实值
         foreach (var a in _attrs)
             _baseValues[a.Key] = a.GetValue(_player);
 
         TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs registered", _attrs.Count));
     }
 
-    // ── 刷新基准：把基准值更新为当前真实状态（含升级/换装备）──
-    private void SyncBaseToCurrent()
-    {
-        if (_player == null) return;
-        var fresh = FindObjectOfType<PlayerManager>();
-        if (fresh != null) _player = fresh;
-        foreach (var a in _attrs)
-        {
-            string val = a.GetValue(_player);
-            _baseValues[a.Key] = val;
-            _inputBuffers[a.Key] = val;
-        }
-        TrainerManager.Log.LogInfo("[Trainer] Base synced to current state");
-    }
-
-    // ── 全部应用 ──
     private void ApplyAll()
     {
         if (_player == null) return;
@@ -267,7 +246,6 @@ public class TrainerBehaviour : MonoBehaviour
         TrainerManager.Log.LogInfo("[Trainer] All applied");
     }
 
-    // ── 全部重置：回到基准值 ──
     private void ResetAll()
     {
         if (_player == null) return;
@@ -282,7 +260,6 @@ public class TrainerBehaviour : MonoBehaviour
         TrainerManager.Log.LogInfo("[Trainer] All reset to base");
     }
 
-    // ── 便捷方法 ──
     private void S(string f, string cn, string en, AttrType t) => AddAttr(f, cn, en, t, SaveStatus.Saved);
     private void N(string f, string cn, string en, AttrType t) => AddAttr(f, cn, en, t, SaveStatus.NotSaved);
 
