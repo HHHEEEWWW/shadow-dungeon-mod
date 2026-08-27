@@ -30,7 +30,16 @@
 ## 前置条件
 
 - Steam 版《Shadow Dungeon》
-- BepInEx 5.x（Mono 版本）— 通过 BepInEx-Manager 隔离模式管理
+- BepInEx 5.x（Mono 版本）
+
+### 推荐 Mod 管理器
+
+> 💡 **强烈建议**使用以下管理器安装和管理 BepInEx，自动处理隔离模式、版本匹配、插件部署：
+
+| 管理器 | 链接 | 说明 |
+|--------|------|------|
+| **BepInEx-Manager** | [GitHub](https://github.com/HHHEEEWWW/bepinex-manager) | 作者自用管理器，支持多游戏隔离档案 |
+| **r2modman** | [GitHub](https://github.com/ebkr/r2modmanPlus) · [Thunderstore](https://thunderstore.io/package/ebkr/r2modman/) | 通用 Mod 管理器，支持数百款游戏 |
 
 ## 构建与部署
 
