@@ -56,7 +56,11 @@ public class TrainerBehaviour : MonoBehaviour
         ResetAll();
     }
 
-    private void OnApplicationQuit() { ResetAll(); }
+    private void OnApplicationQuit()
+    {
+        Scan();    // 关闭前扫描一次
+        ResetAll();
+    }
 
     private bool OnQuit()
     {
@@ -122,12 +126,25 @@ public class TrainerBehaviour : MonoBehaviour
         catch { }
     }
 
+    private float _lastScanTime;
+
     private void Update()
     {
+        // Home 键切换
         if (Input.GetKeyDown(KeyCode.Home))
         {
+            bool wasOpen = _showPanel;
             _showPanel = !_showPanel;
-            if (_showPanel) Scan();
+            if (_showPanel && !wasOpen) Scan();   // 打开时立即扫
+            if (!_showPanel && wasOpen) Scan();    // 关闭时立即扫
+        }
+
+        // 定时扫描：面板开→2秒，面板关→5秒
+        float interval = _showPanel ? 2f : 5f;
+        if (Time.realtimeSinceStartup - _lastScanTime >= interval)
+        {
+            _lastScanTime = Time.realtimeSinceStartup;
+            Scan();
         }
     }
 
