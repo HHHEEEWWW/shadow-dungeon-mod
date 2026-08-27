@@ -143,20 +143,21 @@ public class TrainerBehaviour : MonoBehaviour
 
     /// <summary>
     /// 重置所有属性：当前值 - delta → 消除修改器影响。
-    /// 触发时机：退出游戏 / 返回主菜单 / 游戏保存 / 场景切换。
+    /// 同时写入 PlayerManager（运行时）+ PlayerSaveData（存档），确保游戏保存时用干净值。
     /// </summary>
     public void DoReset()
     {
         if (_player == null) return;
-        // 检查所有三种 delta 类型，任一有值就执行重置
         bool hasDelta = _deltaFloat.Count > 0 || _deltaInt.Count > 0 || _deltaLong.Count > 0;
         if (!hasDelta) return;
 
         foreach (var a in _attrs)
         {
             a.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
+            // 同步写入 PlayerSaveData，确保游戏保存时也是干净值
+            a.WriteToSaveData(a.GetValue(_player!));
         }
-        TrainerManager.Log.LogInfo("[Trainer] EXIT RESET: all attrs restored to clean state");
+        TrainerManager.Log.LogInfo("[Trainer] EXIT RESET: all attrs restored (PlayerManager + PlayerSaveData)");
     }
 
     private void OnGUI()
@@ -477,6 +478,51 @@ public class AttrEntry
 
     public string GetValue(PlayerManager p) => _getter(p);
     public bool TrySetValue(PlayerManager p, string v) => _setter(p, v);
+
+    /// <summary>
+    /// 写入 PlayerSaveData（持久化到存档）。
+    /// </summary>
+    public void WriteToSaveData(string value)
+    {
+        try
+        {
+            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (saveMgrType == null) return;
+            var instProp = saveMgrType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+                ?? saveMgrType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            var sm = instProp?.GetValue(null);
+            if (sm == null) return;
+            var rd = saveMgrType.GetProperty("RuntimeData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(sm);
+            if (rd == null) return;
+            var pd = rd.GetType().GetProperty("PlayerData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(rd);
+            if (pd == null) return;
+            var f = pd.GetType().GetField(Key,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (f == null || f.FieldType != GetFieldType()) return;
+            object? boxed = Type switch
+            {
+                AttrType.Int => int.TryParse(value, out var iv) ? iv : null,
+                AttrType.Long => long.TryParse(value, out var lv) ? lv : null,
+                AttrType.Float => float.TryParse(value, out var fv) ? fv : null,
+                _ => null
+            };
+            if (boxed != null) f.SetValue(pd, boxed);
+        }
+        catch { }
+    }
+
+    private Type GetFieldType() => Type switch
+    {
+        AttrType.Int => typeof(int),
+        AttrType.Long => typeof(long),
+        AttrType.Float => typeof(float),
+        AttrType.Bool => typeof(bool),
+        _ => typeof(object)
+    };
 
     /// <summary>
     /// 累计 delta：delta += (newVal - oldVal)
