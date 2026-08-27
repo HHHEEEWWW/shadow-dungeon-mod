@@ -1,0 +1,88 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ShadowDungeonTrainer</AssemblyName>
+    <RootNamespace>ShadowDungeonTrainer</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <!-- BepInEx 5.x root, supplied by build.ps1 via -p:BepDir=... -->
+    <BepDir Condition="'$(BepDir)' == ''">__BEPDIR_NOT_SET__</BepDir>
+    <!-- Game Managed directory for game assemblies -->
+    <GameManaged Condition="'$(GameManaged)' == ''">__GAMEMANAGED_NOT_SET__</GameManaged>
+  </PropertyGroup>
+  <Target Name="CheckBepDir" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(BepDir)' == '__BEPDIR_NOT_SET__'"
+           Text="BepDir is not set. Run build.ps1 or pass -p:BepDir=&lt;profile&gt;\BepInEx." />
+    <Error Condition="'$(GameManaged)' == '__GAMEMANAGED_NOT_SET__'"
+           Text="GameManaged is not set. Run build.ps1 or pass -p:GameManaged=&lt;game&gt;\Shadow Dungeon_Data\Managed." />
+  </Target>
+  <ItemGroup>
+    <!-- BepInEx 5.x core -->
+    <Reference Include="BepInEx">
+      <HintPath>$(BepDir)\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepDir)\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Unity engine (from game Managed) -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManaged)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameManaged)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameManaged)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(GameManaged)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Game framework -->
+    <Reference Include="FinkFramework.Runtime">
+      <HintPath>$(GameManaged)\FinkFramework.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Game assemblies -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(GameManaged)\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Framework -->
+    <Reference Include="mscorlib">
+      <HintPath>$(GameManaged)\mscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System">
+      <HintPath>$(GameManaged)\System.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Core">
+      <HintPath>$(GameManaged)\System.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- UniTask (game uses it) -->
+    <Reference Include="UniTask">
+      <HintPath>$(GameManaged)\UniTask.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

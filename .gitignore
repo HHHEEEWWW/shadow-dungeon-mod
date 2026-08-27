@@ -1,0 +1,23 @@
+## Build output
+src/*/bin/
+src/*/obj/
+
+## Tools (downloaded binaries)
+tools/*.exe
+tools/*.zip
+tools/bepinex5/
+tools/reflect*.cs
+
+## BepInEx logs
+BepInEx/
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+## IDE
+.vs/
+.vscode/
+*.user
+*.suo
