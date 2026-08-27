@@ -102,6 +102,8 @@ public class TrainerBehaviour : MonoBehaviour
             RestoreOriginal();
         if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(100)))
             ResetAll();
+        if (GUILayout.Button(_useChinese ? "重新计算属性" : "Recalc Stats", GUILayout.Width(120)))
+            RecalcStats();
         GUILayout.FlexibleSpace();
         GUILayout.Label(string.Format("Lv.{0}  HP:{1:F0}  MP:{2:F0}", _player.Level, _player.Health, _player.Mana), GUILayout.Width(300));
         GUILayout.EndHorizontal();
@@ -444,6 +446,34 @@ public class TrainerBehaviour : MonoBehaviour
             }
         }
         TrainerManager.Log.LogInfo("[Trainer] All attributes restored to TRUE original (first scan)");
+    }
+
+    /// <summary>
+    /// 调用游戏内置的 RefreshRuntimeDerivedStats()，
+    /// 从装备+天赋+等级重新计算所有属性值。
+    /// 修改过的值会被正确的计算值覆盖。
+    /// </summary>
+    private void RecalcStats()
+    {
+        if (_player == null) return;
+        try
+        {
+            var method = typeof(PlayerManager).GetMethod("RefreshRuntimeDerivedStats",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (method == null)
+            {
+                TrainerManager.Log.LogWarning("[Trainer] RefreshRuntimeDerivedStats not found");
+                return;
+            }
+            method.Invoke(_player, null);
+            // 刷新输入框显示
+            RefreshCurrentValues(false);
+            TrainerManager.Log.LogInfo("[Trainer] Stats recalculated from equipment+talents");
+        }
+        catch (Exception e)
+        {
+            TrainerManager.Log.LogWarning("[Trainer] RecalcStats failed: " + e.Message);
+        }
     }
 
     private void AddAttr(string field, string nameCN, string nameEN, AttrType type, SaveStatus save)
