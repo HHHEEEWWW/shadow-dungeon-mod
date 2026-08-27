@@ -44,7 +44,9 @@ public class TrainerBehaviour : MonoBehaviour
     private PlayerManager? _player;
 
     private readonly Dictionary<string, string> _inputBuffers = new();
-    private readonly Dictionary<string, string> _originalValues = new();
+    // ⚠️ 原始值：只在首次扫描时捕获一次，永不覆盖
+    private readonly Dictionary<string, string> _trueOriginalValues = new();
+    private bool _originalCaptured;
 
     private object? _talentMgr;
     private object? _saveMgr;
@@ -96,6 +98,8 @@ public class TrainerBehaviour : MonoBehaviour
             RefreshCurrentDisplayOnly();
         if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(100)))
             ApplyAll();
+        if (GUILayout.Button(_useChinese ? "恢复原始值" : "Restore Original", GUILayout.Width(110)))
+            RestoreOriginal();
         if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(100)))
             ResetAll();
         GUILayout.FlexibleSpace();
@@ -183,7 +187,7 @@ public class TrainerBehaviour : MonoBehaviour
         string resetLabel = _useChinese ? "重置" : "Reset";
         if (GUI.Button(new Rect(labelW + valueW + inputW + gap * 2 + btnW, y, btnW, rowH), resetLabel))
         {
-            if (_originalValues.TryGetValue(attr.Key, out var orig))
+            if (_trueOriginalValues.TryGetValue(attr.Key, out var orig))
             {
                 _inputBuffers[attr.Key] = orig;
                 attr.TrySetValue(_player!, orig);
@@ -205,7 +209,8 @@ public class TrainerBehaviour : MonoBehaviour
 
         _attrs.Clear();
         _inputBuffers.Clear();
-        _originalValues.Clear();
+        _trueOriginalValues.Clear();
+        _originalCaptured = false;
 
         // ══════════════════════════════════════════
         //  ✅ 退出后保存的属性
@@ -392,8 +397,11 @@ public class TrainerBehaviour : MonoBehaviour
         {
             var val = attr.GetValue(_player);
             _inputBuffers[attr.Key] = val;
-            if (recordOriginal) _originalValues[attr.Key] = val;
+            // ⚠️ 原始值只捕获一次，之后永不覆盖
+            if (recordOriginal && !_originalCaptured)
+                _trueOriginalValues[attr.Key] = val;
         }
+        if (recordOriginal) _originalCaptured = true;
     }
 
     private void ApplyAll()
@@ -412,13 +420,30 @@ public class TrainerBehaviour : MonoBehaviour
         if (_player == null) return;
         foreach (var attr in _attrs)
         {
-            if (_originalValues.TryGetValue(attr.Key, out var orig))
+            if (_trueOriginalValues.TryGetValue(attr.Key, out var orig))
             {
                 _inputBuffers[attr.Key] = orig;
                 attr.TrySetValue(_player, orig);
             }
         }
         TrainerManager.Log.LogInfo("[Trainer] All attributes reset to original");
+    }
+
+    /// <summary>
+    /// 恢复所有属性到首次扫描时的原始值（完全未修改的状态）。
+    /// </summary>
+    private void RestoreOriginal()
+    {
+        if (_player == null) return;
+        foreach (var attr in _attrs)
+        {
+            if (_trueOriginalValues.TryGetValue(attr.Key, out var orig))
+            {
+                _inputBuffers[attr.Key] = orig;
+                attr.TrySetValue(_player, orig);
+            }
+        }
+        TrainerManager.Log.LogInfo("[Trainer] All attributes restored to TRUE original (first scan)");
     }
 
     private void AddAttr(string field, string nameCN, string nameEN, AttrType type, SaveStatus save)
