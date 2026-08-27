@@ -48,6 +48,9 @@ public class TrainerBehaviour : MonoBehaviour
     private readonly Dictionary<string, string> _trueOriginalValues = new();
     private bool _originalCaptured;
 
+    // 缓存的 GUIStyle（避免每帧 GC）
+    private GUIStyle? _labelStyle, _headerStyle, _titleStyle, _sectionStyle;
+
     private object? _talentMgr;
     private object? _saveMgr;
 
@@ -64,23 +67,23 @@ public class TrainerBehaviour : MonoBehaviour
     {
         if (!_showPanel) return;
 
-        // 全局字体放大
-        GUI.skin.label.fontSize = 14;
-        GUI.skin.textField.fontSize = 13;
-        GUI.skin.button.fontSize = 12;
+        // ── 全局字体（用 cached 避免每帧 GC）──
+        if (_labelStyle == null)
+        {
+            _labelStyle = new GUIStyle(GUI.skin.label) { fontSize = 16 };
+            _headerStyle = new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold };
+            _titleStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            _sectionStyle = new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
+        }
+        GUI.skin.textField.fontSize = 15;
+        GUI.skin.button.fontSize = 14;
 
-        var panelRect = new Rect(20, 20, 760, Screen.height - 40);
+        var panelRect = new Rect(20, 20, 780, Screen.height - 40);
         GUI.Box(panelRect, "");
 
         // 标题 + 中英切换
-        var titleStyle = new GUIStyle(GUI.skin.label)
-        {
-            fontSize = 20,
-            fontStyle = FontStyle.Bold,
-            alignment = TextAnchor.MiddleCenter
-        };
         string title = _useChinese ? "Shadow Dungeon 修改器 (Home 切换)" : "Shadow Dungeon TRAINER (Home toggle)";
-        GUI.Label(new Rect(20, 25, 640, 30), title, titleStyle);
+        GUI.Label(new Rect(20, 25, 660, 35), title, _titleStyle);
 
         string langBtn = _useChinese ? "EN" : "中";
         if (GUI.Button(new Rect(680, 28, 60, 26), langBtn))
@@ -115,19 +118,18 @@ public class TrainerBehaviour : MonoBehaviour
         GUILayout.EndArea();
 
         // 表头
-        float headerY = 98;
-        var headerStyle = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold };
-        GUI.Label(new Rect(25, headerY, 200, 20), _useChinese ? "属性名" : "Attribute", headerStyle);
-        GUI.Label(new Rect(225, headerY, 100, 20), _useChinese ? "当前值" : "Current", headerStyle);
-        GUI.Label(new Rect(325, headerY, 130, 20), _useChinese ? "修改值" : "New Value", headerStyle);
-        GUI.Label(new Rect(465, headerY, 50, 20), "OK", headerStyle);
-        GUI.Label(new Rect(525, headerY, 50, 20), _useChinese ? "重置" : "Reset", headerStyle);
+        float headerY = 100;
+        GUI.Label(new Rect(25, headerY, 220, 24), _useChinese ? "属性名" : "Attribute", _headerStyle);
+        GUI.Label(new Rect(245, headerY, 110, 24), _useChinese ? "当前值" : "Current", _headerStyle);
+        GUI.Label(new Rect(355, headerY, 140, 24), _useChinese ? "修改值" : "New Value", _headerStyle);
+        GUI.Label(new Rect(505, headerY, 55, 24), "OK", _headerStyle);
+        GUI.Label(new Rect(570, headerY, 55, 24), _useChinese ? "重置" : "Reset", _headerStyle);
 
         // 滚动区域
         _scrollPos = GUI.BeginScrollView(
-            new Rect(25, 120, 730, panelRect.height - 140),
+            new Rect(25, 128, 740, panelRect.height - 148),
             _scrollPos,
-            new Rect(0, 0, 700, _attrs.Count * 32 + 60));
+            new Rect(0, 0, 710, _attrs.Count * 36 + 70));
 
         float y = 5;
 
@@ -154,30 +156,24 @@ public class TrainerBehaviour : MonoBehaviour
 
     private void DrawSectionHeader(ref float y, string text)
     {
-        var style = new GUIStyle(GUI.skin.label)
-        {
-            fontSize = 15,
-            fontStyle = FontStyle.Bold,
-            normal = { textColor = new Color(0.8f, 0.9f, 1f) }
-        };
-        GUI.Label(new Rect(0, y, 600, 26), text, style);
-        y += 28;
+        GUI.Label(new Rect(0, y, 600, 28), text, _sectionStyle);
+        y += 32;
     }
 
     private void DrawAttrRow(ref float y, AttrEntry attr)
     {
-        const float labelW = 200;
-        const float valueW = 100;
-        const float inputW = 130;
-        const float btnW = 50;
-        const float rowH = 28;
+        const float labelW = 220;
+        const float valueW = 110;
+        const float inputW = 140;
+        const float btnW = 55;
+        const float rowH = 32;
         const float gap = 4;
 
         string displayName = _useChinese ? attr.NameCN : attr.NameEN;
-        GUI.Label(new Rect(0, y, labelW, rowH), displayName);
+        GUI.Label(new Rect(0, y, labelW, rowH), displayName, _labelStyle);
 
         var currentVal = attr.GetValue(_player!);
-        GUI.Label(new Rect(labelW, y, valueW, rowH), currentVal);
+        GUI.Label(new Rect(labelW, y, valueW, rowH), currentVal, _labelStyle);
 
         if (!_inputBuffers.ContainsKey(attr.Key))
             _inputBuffers[attr.Key] = currentVal;
@@ -215,8 +211,8 @@ public class TrainerBehaviour : MonoBehaviour
 
         _attrs.Clear();
         _inputBuffers.Clear();
-        _trueOriginalValues.Clear();
-        _originalCaptured = false;
+        // ⚠️ _trueOriginalValues 不清空——只在首次扫描时捕获
+        // ⚠️ _originalCaptured 不重置——保证原始值永不被覆盖
 
         // ══════════════════════════════════════════
         //  ✅ 退出后保存的属性
