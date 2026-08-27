@@ -64,13 +64,18 @@ public class TrainerBehaviour : MonoBehaviour
     {
         if (!_showPanel) return;
 
+        // 全局字体放大
+        GUI.skin.label.fontSize = 14;
+        GUI.skin.textField.fontSize = 13;
+        GUI.skin.button.fontSize = 12;
+
         var panelRect = new Rect(20, 20, 760, Screen.height - 40);
         GUI.Box(panelRect, "");
 
         // 标题 + 中英切换
         var titleStyle = new GUIStyle(GUI.skin.label)
         {
-            fontSize = 18,
+            fontSize = 20,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter
         };
@@ -151,12 +156,12 @@ public class TrainerBehaviour : MonoBehaviour
     {
         var style = new GUIStyle(GUI.skin.label)
         {
-            fontSize = 13,
+            fontSize = 15,
             fontStyle = FontStyle.Bold,
             normal = { textColor = new Color(0.8f, 0.9f, 1f) }
         };
-        GUI.Label(new Rect(0, y, 600, 24), text, style);
-        y += 26;
+        GUI.Label(new Rect(0, y, 600, 26), text, style);
+        y += 28;
     }
 
     private void DrawAttrRow(ref float y, AttrEntry attr)
@@ -205,8 +210,7 @@ public class TrainerBehaviour : MonoBehaviour
         _player = FindObjectOfType<PlayerManager>();
         if (_player == null)
         {
-            TrainerManager.Log.LogWarning("[Trainer] PlayerManager not found");
-            return;
+            TrainerManager.Log.LogWarning("[Trainer] PlayerManager not found");            return;
         }
 
         _attrs.Clear();
@@ -449,26 +453,77 @@ public class TrainerBehaviour : MonoBehaviour
     }
 
     /// <summary>
-    /// 调用游戏内置的 RefreshRuntimeDerivedStats()，
-    /// 从装备+天赋+等级重新计算所有属性值。
-    /// 修改过的值会被正确的计算值覆盖。
+    /// 直接把 PlayerSaveData 中被修改的倍率字段设回默认值（1.0），
+    /// 然后重新初始化 PlayerManager。这会保留等级/装备/金币等进度。
     /// </summary>
     private void RecalcStats()
     {
         if (_player == null) return;
         try
         {
-            var method = typeof(PlayerManager).GetMethod("RefreshRuntimeDerivedStats",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (method == null)
+            // 获取 PlayerSaveData
+            var saveMgrType = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (saveMgrType == null) { TrainerManager.Log.LogWarning("[Trainer] SaveManager type not found"); return; }
+            var instProp = saveMgrType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+                ?? saveMgrType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            var saveMgr = instProp?.GetValue(null);
+            if (saveMgr == null) { TrainerManager.Log.LogWarning("[Trainer] SaveManager.Instance is null"); return; }
+
+            var runtimeData = saveMgrType.GetProperty("RuntimeData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(saveMgr);
+            if (runtimeData == null) { TrainerManager.Log.LogWarning("[Trainer] RuntimeData is null"); return; }
+
+            var playerData = runtimeData.GetType().GetProperty("PlayerData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(runtimeData);
+            if (playerData == null) { TrainerManager.Log.LogWarning("[Trainer] PlayerData is null"); return; }
+
+            var psdType = playerData.GetType();
+            int resetCount = 0;
+
+            // 把所有 Bei（倍率）字段设回 1.0
+            string[] beiFields = { "Health_Bei", "Mana_Bei", "Damage_Bei", "MVSpeed_Bei", "ATSpeed_Bei",
+                                   "FireDamage_Bei", "FrozenDamage_Bei", "ThunderDamage_Bei",
+                                   "PoisonDamage_Bei", "PhysicsDamage_Bei", "ShadowDamage_Bei" };
+            foreach (var fname in beiFields)
             {
-                TrainerManager.Log.LogWarning("[Trainer] RefreshRuntimeDerivedStats not found");
-                return;
+                var f = psdType.GetField(fname, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f != null && f.FieldType == typeof(float))
+                {
+                    f.SetValue(playerData, 1f);
+                    resetCount++;
+                }
             }
-            method.Invoke(_player, null);
-            // 刷新输入框显示
+
+            // 把百分比字段设回 0
+            string[] pctFields = { "Health_Percent", "Mana_Percent", "Damage_Anti", "GeDang",
+                                   "BJrate", "BJDamage", "JYrate", "CoolDown" };
+            foreach (var fname in pctFields)
+            {
+                var f = psdType.GetField(fname, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f != null && f.FieldType == typeof(float))
+                {
+                    f.SetValue(playerData, 0f);
+                    resetCount++;
+                }
+            }
+
+            // 用重置后的 PlayerSaveData 重新初始化
+            var initMethod = typeof(PlayerManager).GetMethod("InitFromSaveData",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            initMethod?.Invoke(_player, new object[] { playerData });
+
+            var afterMethod = typeof(PlayerManager).GetMethod("InitializeAfterSaveRestore",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            afterMethod?.Invoke(_player, null);
+
+            var refreshMethod = typeof(PlayerManager).GetMethod("RefreshRuntimeDerivedStats",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            refreshMethod?.Invoke(_player, null);
+
             RefreshCurrentValues(false);
-            TrainerManager.Log.LogInfo("[Trainer] Stats recalculated from equipment+talents");
+            TrainerManager.Log.LogInfo(string.Format("[Trainer] Reset {0} fields in PlayerSaveData, re-initialized", resetCount));
         }
         catch (Exception e)
         {
