@@ -34,8 +34,14 @@ public class TrainerBehaviour : MonoBehaviour
     private readonly List<AttrEntry> _attrs = new();
     private PlayerManager? _player;
 
-    // 核心：基准值（上一次确认时的真实值）+ 修改器输入
-    private readonly Dictionary<string, string> _baseValues = new();
+    // ── 核心：delta 模型 ──
+    // delta[key] = 修改器对这个属性的累计影响量
+    // 重置 = 当前值 - delta → 消除修改器的影响
+    private readonly Dictionary<string, float> _deltaFloat = new();
+    private readonly Dictionary<string, int> _deltaInt = new();
+    private readonly Dictionary<string, long> _deltaLong = new();
+
+    // 输入框
     private readonly Dictionary<string, string> _inputBuffers = new();
 
     private GUIStyle? _labelStyle, _headerStyle, _titleStyle, _sectionStyle;
@@ -135,7 +141,6 @@ public class TrainerBehaviour : MonoBehaviour
         string name = _useChinese ? attr.NameCN : attr.NameEN;
         GUI.Label(new Rect(0, y, LW, RH), name, _labelStyle);
 
-        // 当前值 = 游戏计算的真实值（如果没被修改器覆盖）或修改器值
         string current = attr.GetValue(_player!);
         GUI.Label(new Rect(LW, y, VW, RH), current, _labelStyle);
 
@@ -143,26 +148,24 @@ public class TrainerBehaviour : MonoBehaviour
             _inputBuffers[attr.Key] = current;
         _inputBuffers[attr.Key] = GUI.TextField(new Rect(LW + VW, y, IW, RH), _inputBuffers[attr.Key]);
 
-        // OK：记录基准 = 改之前的值，然后应用
+        // OK：delta += 新值 - 旧值
         if (GUI.Button(new Rect(LW + VW + IW + G, y, BW, RH), "OK"))
         {
-            string before = attr.GetValue(_player!);
+            string oldStr = attr.GetValue(_player!);
             if (attr.TrySetValue(_player!, _inputBuffers[attr.Key]))
             {
-                _baseValues[attr.Key] = before;
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", name, before, _inputBuffers[attr.Key]));
+                attr.AccumulateDelta(_deltaFloat, _deltaInt, _deltaLong, oldStr, _inputBuffers[attr.Key]);
+                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2} (delta accumulated)", name, oldStr, _inputBuffers[attr.Key]));
             }
         }
 
-        // 重置：回到基准值（改之前的状态）
+        // 重置：当前值 - delta → 消除修改器影响
         if (GUI.Button(new Rect(LW + VW + IW + G * 2 + BW, y, BW, RH), _useChinese ? "重置" : "Reset"))
         {
-            if (_baseValues.TryGetValue(attr.Key, out var bas))
-            {
-                _inputBuffers[attr.Key] = bas;
-                attr.TrySetValue(_player!, bas);
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset -> {1}", name, bas));
-            }
+            attr.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
+            // 更新输入框显示
+            _inputBuffers[attr.Key] = attr.GetValue(_player!);
+            TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset (delta subtracted)", name));
         }
 
         y += RH + G;
@@ -174,7 +177,9 @@ public class TrainerBehaviour : MonoBehaviour
         if (_player == null) { TrainerManager.Log.LogWarning("[Trainer] PlayerManager not found"); return; }
 
         _attrs.Clear();
-        _baseValues.Clear();
+        _deltaFloat.Clear();
+        _deltaInt.Clear();
+        _deltaLong.Clear();
         _inputBuffers.Clear();
 
         // ══ ✅ 退出后保存 ══
@@ -224,11 +229,7 @@ public class TrainerBehaviour : MonoBehaviour
         N("MVSpeed_Base",     "移动速度基础",  "Move Spd Base",  AttrType.Float);
         N("ATSpeed_Base",     "攻击速度基础",  "ATK Spd Base",   AttrType.Float);
 
-        // 基准 = 当前真实值
-        foreach (var a in _attrs)
-            _baseValues[a.Key] = a.GetValue(_player);
-
-        TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs registered", _attrs.Count));
+        TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs, delta model", _attrs.Count));
     }
 
     private void ApplyAll()
@@ -238,12 +239,12 @@ public class TrainerBehaviour : MonoBehaviour
         {
             if (_inputBuffers.TryGetValue(a.Key, out var input))
             {
-                string before = a.GetValue(_player);
+                string oldStr = a.GetValue(_player);
                 if (a.TrySetValue(_player, input))
-                    _baseValues[a.Key] = before;
+                    a.AccumulateDelta(_deltaFloat, _deltaInt, _deltaLong, oldStr, input);
             }
         }
-        TrainerManager.Log.LogInfo("[Trainer] All applied");
+        TrainerManager.Log.LogInfo("[Trainer] All applied (delta accumulated)");
     }
 
     private void ResetAll()
@@ -251,13 +252,10 @@ public class TrainerBehaviour : MonoBehaviour
         if (_player == null) return;
         foreach (var a in _attrs)
         {
-            if (_baseValues.TryGetValue(a.Key, out var bas))
-            {
-                _inputBuffers[a.Key] = bas;
-                a.TrySetValue(_player, bas);
-            }
+            a.ResetByDelta(_player!, _deltaFloat, _deltaInt, _deltaLong);
+            _inputBuffers[a.Key] = a.GetValue(_player!);
         }
-        TrainerManager.Log.LogInfo("[Trainer] All reset to base");
+        TrainerManager.Log.LogInfo("[Trainer] All reset (delta subtracted)");
     }
 
     private void S(string f, string cn, string en, AttrType t) => AddAttr(f, cn, en, t, SaveStatus.Saved);
@@ -376,6 +374,62 @@ public class AttrEntry
 
     public string GetValue(PlayerManager p) => _getter(p);
     public bool TrySetValue(PlayerManager p, string v) => _setter(p, v);
+
+    /// <summary>
+    /// 累计 delta：delta += (newVal - oldVal)
+    /// </summary>
+    public void AccumulateDelta(
+        Dictionary<string, float> dF, Dictionary<string, int> dI, Dictionary<string, long> dL,
+        string oldStr, string newStr)
+    {
+        switch (Type)
+        {
+            case AttrType.Float:
+                if (float.TryParse(oldStr, out var of) && float.TryParse(newStr, out var nf))
+                {
+                    dF.TryGetValue(Key, out var cur);
+                    dF[Key] = cur + (nf - of);
+                }
+                break;
+            case AttrType.Int:
+                if (int.TryParse(oldStr, out var oi) && int.TryParse(newStr, out var ni))
+                {
+                    dI.TryGetValue(Key, out var cur);
+                    dI[Key] = cur + (ni - oi);
+                }
+                break;
+            case AttrType.Long:
+                if (long.TryParse(oldStr, out var ol) && long.TryParse(newStr, out var nl))
+                {
+                    dL.TryGetValue(Key, out var cur);
+                    dL[Key] = cur + (nl - ol);
+                }
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 重置：当前值 - delta → 消除修改器影响
+    /// </summary>
+    public void ResetByDelta(PlayerManager p,
+        Dictionary<string, float> dF, Dictionary<string, int> dI, Dictionary<string, long> dL)
+    {
+        switch (Type)
+        {
+            case AttrType.Float:
+                if (dF.TryGetValue(Key, out var df) && float.TryParse(GetValue(p), out var cur))
+                    TrySetValue(p, (cur - df).ToString("F2"));
+                break;
+            case AttrType.Int:
+                if (dI.TryGetValue(Key, out var di) && int.TryParse(GetValue(p), out var curI))
+                    TrySetValue(p, (curI - di).ToString());
+                break;
+            case AttrType.Long:
+                if (dL.TryGetValue(Key, out var dl) && long.TryParse(GetValue(p), out var curL))
+                    TrySetValue(p, (curL - dl).ToString());
+                break;
+        }
+    }
 }
 
 public enum AttrType { Int, Long, Float, Bool }
