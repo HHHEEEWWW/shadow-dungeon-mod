@@ -136,19 +136,19 @@ public class TrainerBehaviour : MonoBehaviour
         if (!_showPanel) return;
         if (_ls == null)
         {
-            _ls = new GUIStyle(GUI.skin.label) { fontSize = 16 };
-            _hs = new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold };
-            _ts = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            _ss = new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
-            _phs = new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } };
+            _ls = new GUIStyle(GUI.skin.label) { fontSize = 32 };
+            _hs = new GUIStyle(GUI.skin.label) { fontSize = 32, fontStyle = FontStyle.Bold };
+            _ts = new GUIStyle(GUI.skin.label) { fontSize = 44, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            _ss = new GUIStyle(GUI.skin.label) { fontSize = 32, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
+            _phs = new GUIStyle(GUI.skin.label) { fontSize = 22, normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } };
         }
-        GUI.skin.textField.fontSize = 15;
-        GUI.skin.button.fontSize = 14;
+        GUI.skin.textField.fontSize = 30;
+        GUI.skin.button.fontSize = 28;
 
-        var pr = new Rect(20, 20, 780, Screen.height - 40);
+        var pr = new Rect(20, 20, 1520, Screen.height - 40);
         GUI.Box(pr, "");
-        GUI.Label(new Rect(20, 25, 660, 35), _useChinese ? "Shadow Dungeon 修改器" : "Shadow Dungeon TRAINER", _ts);
-        if (GUI.Button(new Rect(690, 28, 60, 26), _useChinese ? "EN" : "中")) _useChinese = !_useChinese;
+        GUI.Label(new Rect(20, 25, 1300, 70), _useChinese ? "Shadow Dungeon 修改器" : "Shadow Dungeon TRAINER", _ts);
+        if (GUI.Button(new Rect(1380, 30, 120, 52), _useChinese ? "EN" : "中")) _useChinese = !_useChinese;
 
         if (_player == null)
         {
@@ -157,22 +157,22 @@ public class TrainerBehaviour : MonoBehaviour
             return;
         }
 
-        GUILayout.BeginArea(new Rect(25, 62, 740, 36));
+        GUILayout.BeginArea(new Rect(25, 100, 1480, 72));
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(100))) ApplyAll();
-        if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(100))) { ResetAll(); foreach (var a in _attrs) _inputBuffers[a.Key] = ""; }
+        if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(200))) ApplyAll();
+        if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(200))) { ResetAll(); foreach (var a in _attrs) _inputBuffers[a.Key] = ""; }
         GUILayout.FlexibleSpace();
-        GUILayout.Label(string.Format("Lv.{0}  HP:{1:F0}  MP:{2:F0}", _player.Level, _player.Health, _player.Mana), GUILayout.Width(300));
+        GUILayout.Label(string.Format("Lv.{0}  HP:{1:F0}  MP:{2:F0}", _player.Level, _player.Health, _player.Mana), GUILayout.Width(600));
         GUILayout.EndHorizontal();
         GUILayout.EndArea();
 
-        GUI.Label(new Rect(25, 102, 220, 24), _useChinese ? "属性名" : "Attribute", _hs);
-        GUI.Label(new Rect(245, 102, 110, 24), _useChinese ? "当前值" : "Current", _hs);
-        GUI.Label(new Rect(355, 102, 140, 24), _useChinese ? "修改值" : "New Value", _hs);
-        GUI.Label(new Rect(505, 102, 55, 24), "OK", _hs);
-        GUI.Label(new Rect(570, 102, 55, 24), _useChinese ? "重置" : "Reset", _hs);
+        GUI.Label(new Rect(25, 180, 440, 48), _useChinese ? "属性名" : "Attribute", _hs);
+        GUI.Label(new Rect(465, 180, 220, 48), _useChinese ? "当前值" : "Current", _hs);
+        GUI.Label(new Rect(685, 180, 280, 48), _useChinese ? "修改值" : "New Value", _hs);
+        GUI.Label(new Rect(975, 180, 110, 48), "OK", _hs);
+        GUI.Label(new Rect(1095, 180, 110, 48), _useChinese ? "重置" : "Reset", _hs);
 
-        _scrollPos = GUI.BeginScrollView(new Rect(25, 130, 740, pr.height - 150), _scrollPos, new Rect(0, 0, 710, _attrs.Count * 36 + 70));
+        _scrollPos = GUI.BeginScrollView(new Rect(25, 230, 1480, pr.height - 250), _scrollPos, new Rect(0, 0, 1400, _attrs.Count * 72 + 140));
         float y = 5;
         var sa = _attrs.Where(a => a.Save == SaveStatus.Saved).ToList();
         var na = _attrs.Where(a => a.Save == SaveStatus.NotSaved).ToList();
@@ -181,11 +181,11 @@ public class TrainerBehaviour : MonoBehaviour
         GUI.EndScrollView();
     }
 
-    private void Sec(ref float y, string t) { GUI.Label(new Rect(0, y, 600, 28), t, _ss); y += 32; }
+    private void Sec(ref float y, string t) { GUI.Label(new Rect(0, y, 1200, 56), t, _ss); y += 64; }
 
     private void Row(ref float y, AttrEntry a)
     {
-        const float LW = 220, VW = 110, IW = 140, BW = 55, RH = 32, G = 4;
+        const float LW = 440, VW = 220, IW = 280, BW = 110, RH = 64, G = 8;
         string nm = _useChinese ? a.CN : a.EN;
         // 属性名
         GUI.Label(new Rect(0, y, LW, RH), nm, _ls);
