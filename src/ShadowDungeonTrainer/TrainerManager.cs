@@ -389,12 +389,32 @@ public class TrainerBehaviour : MonoBehaviour
         catch { return "0"; }
     }
 
+    /// <summary>
+    /// 刷新当前值显示，并把原始值同步为当前状态。
+    /// 这样「恢复原始值」会恢复到你刷新那一刻的状态（包含升级/换装备后的值）。
+    /// </summary>
     private void RefreshCurrentDisplayOnly()
     {
         if (_player == null) return;
         var fresh = FindObjectOfType<PlayerManager>();
         if (fresh != null) _player = fresh;
-        TrainerManager.Log.LogInfo("[Trainer] Current values refreshed");
+        // 强制更新原始值为当前状态（包含升级/换装备后的值）
+        RefreshCurrentValuesForceOriginal();
+        TrainerManager.Log.LogInfo("[Trainer] Current values refreshed, originals updated to current state");
+    }
+
+    /// <summary>
+    /// 刷新输入框 + 强制覆盖原始值为当前值（用于刷新按钮）。
+    /// </summary>
+    private void RefreshCurrentValuesForceOriginal()
+    {
+        if (_player == null) return;
+        foreach (var attr in _attrs)
+        {
+            var val = attr.GetValue(_player);
+            _inputBuffers[attr.Key] = val;
+            _trueOriginalValues[attr.Key] = val;
+        }
     }
 
     private void RefreshCurrentValues(bool recordOriginal = false)
