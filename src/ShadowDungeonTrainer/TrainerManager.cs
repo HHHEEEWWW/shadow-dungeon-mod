@@ -151,8 +151,9 @@ public class TrainerBehaviour : MonoBehaviour
             if (_attrs.Count == 0 || _player == null) Scan();
         }
 
-        // 刷新缓存当前值（比 Scan 轻量，只读字段）
-        if (_player != null && Time.realtimeSinceStartup - _lastValueRefreshTime >= 0.5f)
+        // 刷新缓存当前值（轻量：已缓存 FieldInfo，只读字段）
+        float refreshInterval = _showPanel ? 2f : 5f;
+        if (_player != null && Time.realtimeSinceStartup - _lastValueRefreshTime >= refreshInterval)
         {
             _lastValueRefreshTime = Time.realtimeSinceStartup;
             foreach (var a in _attrs)
@@ -170,9 +171,9 @@ public class TrainerBehaviour : MonoBehaviour
             _ts = new GUIStyle(GUI.skin.label) { fontSize = 31, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             _ss = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
             _phs = new GUIStyle(GUI.skin.label) { fontSize = 15, normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } };
+            GUI.skin.textField.fontSize = 21;
+            GUI.skin.button.fontSize = 20;
         }
-        GUI.skin.textField.fontSize = 21;
-        GUI.skin.button.fontSize = 20;
 
         var pr = new Rect(20, 20, 1520, Screen.height - 40);
         GUI.Box(pr, "");
@@ -302,6 +303,11 @@ public class TrainerBehaviour : MonoBehaviour
         N("MVSpeed_Base",     "移动速度基础",  "Move Spd Base",  AttrType.Float);
         N("ATSpeed_Base",     "攻击速度基础",  "ATK Spd Base",   AttrType.Float);
 
+        // 立即填充当前值缓存
+        _currentValues.Clear();
+        foreach (var a in _attrs)
+            _currentValues[a.Key] = a.Get(_player);
+
         TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs", _attrs.Count));
     }
 
@@ -379,9 +385,10 @@ public class AttrEntry
 
     public static AttrEntry Make(string f, string cn, string en, AttrType t, SaveStatus s)
     {
+        var fi = typeof(PlayerManager).GetField(f, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         return new AttrEntry(f, cn, en, t, s,
-            (p) => ReadPM(f, t),
-            (p, v) => WritePM(f, t, v),
+            (p) => ReadField(p, fi, t),
+            (p, v) => WriteField(p, fi, t, v),
             null, null);
     }
 
@@ -472,27 +479,25 @@ public class AttrEntry
         catch { }
     }
 
-    private static string ReadPM(string f, AttrType t)
+    private static string ReadField(PlayerManager p, FieldInfo? fi, AttrType t)
     {
         try
         {
-            var fi = typeof(PlayerManager).GetField(f, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (fi == null) return "?";
-            var v = fi.GetValue(UnityEngine.Object.FindObjectOfType<PlayerManager>());
+            if (p == null || fi == null) return "?";
+            var v = fi.GetValue(p);
             return t switch { AttrType.Int => ((int)v).ToString(), AttrType.Long => ((long)v).ToString(), AttrType.Float => ((float)v).ToString("F2"), _ => v?.ToString() ?? "?" };
         }
         catch { return "?"; }
     }
 
-    private static bool WritePM(string f, AttrType t, string v)
+    private static bool WriteField(PlayerManager p, FieldInfo? fi, AttrType t, string v)
     {
         try
         {
-            var fi = typeof(PlayerManager).GetField(f, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (fi == null) return false;
+            if (p == null || fi == null) return false;
             object? b = t switch { AttrType.Int => int.TryParse(v, out var iv) ? iv : null, AttrType.Long => long.TryParse(v, out var lv) ? lv : null, AttrType.Float => float.TryParse(v, out var fv) ? fv : null, AttrType.Bool => bool.TryParse(v, out var bv) ? bv : null, _ => null };
             if (b == null) return false;
-            fi.SetValue(UnityEngine.Object.FindObjectOfType<PlayerManager>(), b);
+            fi.SetValue(p, b);
             return true;
         }
         catch { return false; }
