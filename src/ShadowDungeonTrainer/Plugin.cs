@@ -9,7 +9,7 @@ public class Plugin : BaseUnityPlugin  // BepInEx 5.x Mono: BaseUnityPlugin (Mon
 {
     public const string Guid = "com.shadowdungeon.trainer";
     public const string Name = "ShadowDungeonTrainer";
-    public const string Version = "0.1.0";
+    public const string Version = "1.0.0";
 
     private void Awake()
     {

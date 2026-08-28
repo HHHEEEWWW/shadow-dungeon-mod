@@ -1,10 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using BepInEx.Logging;
+using HarmonyLib;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 
 namespace ShadowDungeonTrainer;
 
@@ -29,36 +28,42 @@ public static class TrainerManager
 
 public class TrainerBehaviour : MonoBehaviour
 {
+    internal static TrainerBehaviour? Instance { get; private set; }
+
     private bool _showPanel;
-    private bool _useChinese = true;
     private Vector2 _scrollPos;
     private readonly List<AttrEntry> _attrs = new();
     private PlayerManager? _player;
 
-    // 核心：每个属性的累计变化量
+    private readonly Dictionary<string, string> _inputBuffers = new();
+    // 每个属性通过修改器累计增加的数值
     private readonly Dictionary<string, float> _deltaF = new();
     private readonly Dictionary<string, int> _deltaI = new();
     private readonly Dictionary<string, long> _deltaL = new();
-
-    private readonly Dictionary<string, string> _inputBuffers = new();
-    private GUIStyle? _ls, _hs, _ts, _ss, _phs;
+    // 缓存当前值，避免每帧反射读取
+    private readonly Dictionary<string, string> _currentValues = new();
+    private float _lastCleanWriteTime;
+    private bool _saveDataDiagLogged;
+    private float _lastSaveMomentCheck;
+    private GUIStyle? _ls, _hs, _ts;
 
     private void Awake()
     {
+        Instance = this;
         Application.wantsToQuit += OnQuit;
-        SceneManager.sceneLoaded += OnScene;
+        HarmonySaveHook.Apply();
     }
 
     private void OnDestroy()
     {
         Application.wantsToQuit -= OnQuit;
-        SceneManager.sceneLoaded -= OnScene;
         ResetAll();
+        if (Instance == this) Instance = null;
     }
 
     private void OnApplicationQuit()
     {
-        Scan();    // 关闭前扫描一次
+        Scan();
         ResetAll();
     }
 
@@ -68,97 +73,46 @@ public class TrainerBehaviour : MonoBehaviour
         return true;
     }
 
-    private void OnScene(Scene s, LoadSceneMode m)
-    {
-        ResetAll();
-        _deltaF.Clear();
-        _deltaI.Clear();
-        _deltaL.Clear();
-    }
-
-    // ══════ 重置 ══════
-    // 只重置基础字段（倍率/百分比），游戏会自动重新计算派生值（HP/攻击力等）
-    // 这样退出后：Health_Bei=1（干净），HP=游戏基于1重算的真实值（包含成长）
-    private void ResetAll()
-    {
-        if (_player == null) _player = UnityEngine.Object.FindObjectOfType<PlayerManager>();
-        if (_player == null) return;
-        bool any = _deltaF.Count > 0 || _deltaI.Count > 0 || _deltaL.Count > 0;
-        if (!any) return;
-
-        // 1. 重置所有修改过的 PlayerManager 运行时值
-        foreach (var a in _attrs)
-        {
-            string cur = a.Get(_player!);
-            string clean = a.SubDelta(cur, _deltaF, _deltaI, _deltaL);
-            if (clean != cur) a.Set(_player!, clean);
-        }
-
-        // 2. 重置 PlayerSaveData 基础字段（让游戏重新计算）
-        WriteAllToSave();
-
-        // 3. 清空 delta
-        _deltaF.Clear();
-        _deltaI.Clear();
-        _deltaL.Clear();
-
-        TrainerManager.Log.LogInfo("[Trainer] Reset done: base fields cleaned, game will recalc");
-    }
-
-    // ══════ 写入 PlayerSaveData ══════
-    private void WriteAllToSave()
-    {
-        try
-        {
-            var smt = typeof(PlayerManager).Assembly.GetType("SaveManager");
-            if (smt == null) return;
-            var ip = smt.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
-                  ?? smt.GetProperty("Instance", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            var sm = ip?.GetValue(null);
-            if (sm == null) return;
-            var rd = smt.GetProperty("RuntimeData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(sm);
-            if (rd == null) return;
-            var pd = rd.GetType().GetProperty("PlayerData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(rd);
-            if (pd == null) return;
-            foreach (var a in _attrs)
-                a.WriteSave(pd);
-        }
-        catch { }
-    }
-
-    private float _lastScanTime;
-    private float _lastValueRefreshTime;
-    // 缓存当前值，避免每帧反射读取
-    private readonly Dictionary<string, string> _currentValues = new();
-
     private void Update()
     {
         // Home 键切换
         if (Input.GetKeyDown(KeyCode.Home))
         {
             _showPanel = !_showPanel;
-            if (_showPanel && _attrs.Count == 0) Scan();
+            if (_showPanel)
+            {
+                if (_player == null) _player = UnityEngine.Object.FindObjectOfType<PlayerManager>();
+                if (_attrs.Count == 0 || _player == null)
+                    Scan();
+                else
+                    RefreshCurrentValues();
+            }
         }
 
         // 缓存 PlayerManager（避免每帧 FindObjectOfType）
         if (_player == null) _player = UnityEngine.Object.FindObjectOfType<PlayerManager>();
 
-        // 定时完整扫描（只在没有属性列表或 PlayerManager 丢失时）
-        float interval = _showPanel ? 2f : 5f;
-        if (Time.realtimeSinceStartup - _lastScanTime >= interval)
+// D：定时把“干净值”写进存档，防止游戏在任意时刻把脏运行值同步进存档
+        if ((_deltaF.Count > 0 || _deltaI.Count > 0 || _deltaL.Count > 0) &&
+            Time.realtimeSinceStartup - _lastCleanWriteTime >= 1f)
         {
-            _lastScanTime = Time.realtimeSinceStartup;
-            if (_attrs.Count == 0 || _player == null) Scan();
+            _lastCleanWriteTime = Time.realtimeSinceStartup;
+            WriteCleanAllToSave();
         }
 
-        // 刷新缓存当前值（轻量：已缓存 FieldInfo，只读字段）
-        float refreshInterval = _showPanel ? 2f : 5f;
-        if (_player != null && Time.realtimeSinceStartup - _lastValueRefreshTime >= refreshInterval)
+        // 轮询 SaveManager 是否激活（游戏读档/存档瞬间可能 Instance 才非空）
+        if (Time.realtimeSinceStartup - _lastSaveMomentCheck >= 0.5f)
         {
-            _lastValueRefreshTime = Time.realtimeSinceStartup;
-            foreach (var a in _attrs)
-                _currentValues[a.Key] = a.Get(_player!);
+            _lastSaveMomentCheck = Time.realtimeSinceStartup;
+            TryHandleSaveMoment();
         }
+    }
+
+    private void RefreshCurrentValues()
+    {
+        if (_player == null) return;
+        foreach (var a in _attrs)
+            _currentValues[a.Key] = a.Get(_player);
     }
 
     private void OnGUI()
@@ -168,88 +122,145 @@ public class TrainerBehaviour : MonoBehaviour
         {
             _ls = new GUIStyle(GUI.skin.label) { fontSize = 22 };
             _hs = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold };
-            _ts = new GUIStyle(GUI.skin.label) { fontSize = 31, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            _ss = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
-            _phs = new GUIStyle(GUI.skin.label) { fontSize = 15, normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } };
-            GUI.skin.textField.fontSize = 21;
-            GUI.skin.button.fontSize = 20;
+            _ts = new GUIStyle(GUI.skin.label) { fontSize = 28, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+            GUI.skin.textField.fontSize = 20;
+            GUI.skin.button.fontSize = 18;
         }
 
-        var pr = new Rect(20, 20, 1520, Screen.height - 40);
+        // 固定紧凑面板，不再占满整个屏幕
+        const float PanelX = 20, PanelY = 20, PanelW = 800;
+        float PanelH = Mathf.Min(Screen.height - 60, 680);
+        var pr = new Rect(PanelX, PanelY, PanelW, PanelH);
         GUI.Box(pr, "");
-        GUI.Label(new Rect(20, 25, 1300, 70), _useChinese ? "Shadow Dungeon 修改器" : "Shadow Dungeon TRAINER", _ts);
-        if (GUI.Button(new Rect(1380, 30, 120, 52), _useChinese ? "EN" : "中")) _useChinese = !_useChinese;
+
+        GUI.Label(new Rect(PanelX + 20, PanelY + 12, 400, 46), "Shadow Dungeon 修改器", _ts);
+        if (GUI.Button(new Rect(PanelX + PanelW - 260, PanelY + 18, 110, 40), "全部重置")) ResetAll();
+        if (GUI.Button(new Rect(PanelX + PanelW - 140, PanelY + 18, 110, 40), "重新扫描")) Scan();
 
         if (_player == null)
         {
-            GUI.Label(new Rect(20, 70, 700, 30), _useChinese ? "未检测到玩家" : "PlayerManager not found");
-            if (GUI.Button(new Rect(20, 110, 120, 30), _useChinese ? "重新扫描" : "Rescan")) Scan();
+            GUI.Label(new Rect(PanelX + 20, PanelY + 80, 500, 30), "未检测到玩家");
             return;
         }
 
-        GUILayout.BeginArea(new Rect(25, 100, 1480, 72));
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(_useChinese ? "全部应用" : "Apply All", GUILayout.Width(200))) ApplyAll();
-        if (GUILayout.Button(_useChinese ? "全部重置" : "Reset All", GUILayout.Width(200))) { ResetAll(); foreach (var a in _attrs) _inputBuffers[a.Key] = ""; }
-        GUILayout.FlexibleSpace();
-        GUILayout.Label(string.Format("Lv.{0}  HP:{1:F0}  MP:{2:F0}", _player.Level, _player.Health, _player.Mana), GUILayout.Width(600));
-        GUILayout.EndHorizontal();
-        GUILayout.EndArea();
+        // 列坐标：属性名 / 当前值 / 修改值 / OK / 重置（横平竖直对齐）
+        const float ColName = 0, ColCur = 286, ColInput = 412, ColOk = 568, ColReset = 644;
+        const float WName = 280, WCur = 120, WInput = 150, WOk = 70, WReset = 70;
 
-        GUI.Label(new Rect(25, 180, 440, 48), _useChinese ? "属性名" : "Attribute", _hs);
-        GUI.Label(new Rect(465, 180, 220, 48), _useChinese ? "当前值" : "Current", _hs);
-        GUI.Label(new Rect(685, 180, 280, 48), _useChinese ? "修改值" : "New Value", _hs);
-        GUI.Label(new Rect(975, 180, 110, 48), "OK", _hs);
-        GUI.Label(new Rect(1095, 180, 110, 48), _useChinese ? "重置" : "Reset", _hs);
+        float areaX = PanelX + 30;
+        float areaY = PanelY + 105;
+        float areaW = PanelW - 60;
+        float areaH = PanelH - 165;
 
-        _scrollPos = GUI.BeginScrollView(new Rect(25, 230, 1480, pr.height - 250), _scrollPos, new Rect(0, 0, 1400, _attrs.Count * 72 + 140));
+        // 表头
+        GUI.Label(new Rect(areaX + ColName, areaY - 38, WName, 30), "属性名", _hs);
+        GUI.Label(new Rect(areaX + ColCur, areaY - 38, WCur, 30), "当前值", _hs);
+        GUI.Label(new Rect(areaX + ColInput, areaY - 38, WInput, 30), "修改值(+/-)", _hs);
+        GUI.Label(new Rect(areaX + ColOk, areaY - 38, WOk, 30), "OK", _hs);
+        GUI.Label(new Rect(areaX + ColReset, areaY - 38, WReset, 30), "重置", _hs);
+
+        float contentH = _attrs.Count * 50 + 10;
+        _scrollPos = GUI.BeginScrollView(new Rect(areaX, areaY, areaW, areaH), _scrollPos, new Rect(0, 0, areaW, contentH));
         float y = 5;
-        var sa = _attrs.Where(a => a.Save == SaveStatus.Saved).ToList();
-        var na = _attrs.Where(a => a.Save == SaveStatus.NotSaved).ToList();
-        if (sa.Count > 0) { Sec(ref y, _useChinese ? "✅ 退出后保存" : "✅ Persists"); foreach (var a in sa) Row(ref y, a); }
-        if (na.Count > 0) { Sec(ref y, _useChinese ? "⚠️ 退出后重置" : "⚠️ Resets on exit"); foreach (var a in na) Row(ref y, a); }
+        foreach (var a in _attrs)
+            Row(ref y, a);
         GUI.EndScrollView();
     }
 
-    private void Sec(ref float y, string t) { GUI.Label(new Rect(0, y, 1200, 56), t, _ss); y += 64; }
-
     private void Row(ref float y, AttrEntry a)
     {
-        const float LW = 308, VW = 154, IW = 196, BW = 77, RH = 45, G = 6;
-        string nm = _useChinese ? a.CN : a.EN;
+        const float XName = 0, XCur = 286, XInput = 412, XOk = 568, XReset = 644;
+        const float WName = 280, WCur = 120, WInput = 150, WOk = 70, WReset = 70;
+        const float RH = 44, G = 6;
+
+        string nm = a.CN;
         // 属性名
-        GUI.Label(new Rect(0, y, LW, RH), nm, _ls);
+        GUI.Label(new Rect(XName, y, WName, RH), nm, _ls);
         // 当前值（从缓存读取，不反射）
         string cur = _currentValues.TryGetValue(a.Key, out var v) ? v : a.Get(_player!);
-        GUI.Label(new Rect(LW, y, VW, RH), cur, _ls);
-        // 输入框（只接收用户要修改的值，placeholder 提示）
+        GUI.Label(new Rect(XCur, y, WCur, RH), cur, _ls);
+        // 输入框（直接填增减量，没有额外说明文字）
         if (!_inputBuffers.ContainsKey(a.Key)) _inputBuffers[a.Key] = "";
-        GUI.Label(new Rect(LW + VW, y - 2, IW, 14), _useChinese ? "输入修改值" : "New value", _phs);
-        _inputBuffers[a.Key] = GUI.TextField(new Rect(LW + VW, y + 12, IW, RH - 12), _inputBuffers[a.Key]);
+        _inputBuffers[a.Key] = GUI.TextField(new Rect(XInput, y + 4, WInput, RH - 8), _inputBuffers[a.Key]);
 
-        // OK：delta += 输入值 - 当前值
-        if (GUI.Button(new Rect(LW + VW + IW + G, y, BW, RH), "OK"))
+        // OK：按增量方式应用
+        if (GUI.Button(new Rect(XOk, y + 2, WOk, RH - 4), "OK"))
         {
             string nv = _inputBuffers[a.Key];
-            if (!string.IsNullOrEmpty(nv) && nv != cur && a.Set(_player!, nv))
-            {
-                a.AddDelta(_deltaF, _deltaI, _deltaL, cur, nv);
-                _inputBuffers[a.Key] = ""; // 清空输入框
-                TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} -> {2}", nm, cur, nv));
-            }
+            if (!string.IsNullOrEmpty(nv) && nv != "0")
+                ApplyOK(a, cur, nv, nm);
         }
 
-        // 重置：当前值 - delta
-        if (GUI.Button(new Rect(LW + VW + IW + G * 2 + BW, y, BW, RH), _useChinese ? "重置" : "Reset"))
+        // 重置：当前值 - 该属性所有修改器增量
+        if (GUI.Button(new Rect(XReset, y + 2, WReset, RH - 4), "重置"))
         {
-            string cur2 = a.Get(_player!);
-            string clean = a.SubDelta(cur2, _deltaF, _deltaI, _deltaL);
-            a.Set(_player!, clean);
-            _inputBuffers[a.Key] = "";
-            a.WriteSave(_player!);
-            TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset -> {1}", nm, clean));
+            ResetAttr(a);
         }
         y += RH + G;
+    }
+
+    private void ApplyOK(AttrEntry a, string cur, string nv, string nm)
+    {
+        // 最终版：改运行时 + 存档始终写干净值
+        string target = a.AddToCurrent(cur, nv);
+        if (a.Set(_player!, target))
+        {
+            a.AddDelta(_deltaF, _deltaI, _deltaL, nv);
+            var pd = GetPlayerSaveData();
+            if (pd != null)
+            {
+                string clean = a.SubDelta(a.Get(_player!), _deltaF, _deltaI, _deltaL);
+                a.WriteSaveField(pd, clean);
+            }
+            _currentValues[a.Key] = a.Get(_player!);
+            _inputBuffers[a.Key] = "";
+            TrainerManager.Log.LogInfo(string.Format("[Trainer] {0}: {1} + {2} -> {3}", nm, cur, nv, target));
+        }
+    }
+
+    private void ResetAttr(AttrEntry a)
+    {
+        if (_player == null) return;
+        string cur = a.Get(_player!);
+        string clean = a.SubDelta(cur, _deltaF, _deltaI, _deltaL);
+        bool changed = clean != cur;
+        if (changed) a.Set(_player!, clean);
+        var pd = GetPlayerSaveData();
+        if (pd != null) a.WriteSaveField(pd, clean);
+        ClearDelta(a.Key);
+        _currentValues[a.Key] = a.Get(_player!);
+        _inputBuffers[a.Key] = "";
+        TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} reset -> {1}", a.CN, clean));
+    }
+
+    internal void ResetAll()
+    {
+        if (_player == null) _player = UnityEngine.Object.FindObjectOfType<PlayerManager>();
+        if (_player == null)
+        {
+            TrainerManager.Log.LogWarning("[Trainer] ResetAll skipped: player null");
+            return;
+        }
+        bool any = _deltaF.Count > 0 || _deltaI.Count > 0 || _deltaL.Count > 0;
+        if (!any) return;
+        foreach (var a in _attrs)
+        {
+            if (HasDelta(a.Key))
+                ResetAttr(a);
+        }
+        TrainerManager.Log.LogInfo("[Trainer] ResetAll done");
+    }
+
+    private bool HasDelta(string key)
+    {
+        return _deltaF.ContainsKey(key) || _deltaI.ContainsKey(key) || _deltaL.ContainsKey(key);
+    }
+
+    private void ClearDelta(string key)
+    {
+        _deltaF.Remove(key);
+        _deltaI.Remove(key);
+        _deltaL.Remove(key);
     }
 
     private void Scan()
@@ -258,74 +269,60 @@ public class TrainerBehaviour : MonoBehaviour
         if (_player == null) { TrainerManager.Log.LogWarning("[Trainer] PlayerManager not found"); return; }
         _attrs.Clear(); _inputBuffers.Clear();
 
-        S("Health",           "生命值",       "HP",              AttrType.Float);
-        S("Mana",             "法力值",       "MP",              AttrType.Float);
-        S("Level",            "等级",         "Level",           AttrType.Int);
-        S("Xp_Total",         "总经验值",     "Total XP",        AttrType.Float);
-        S("Xp_CurrentLevel",  "当前等级经验",  "Level XP",       AttrType.Float);
-        S("Damage_Bei",       "攻击倍率",     "ATK Mult",        AttrType.Float);
-        S("Damage_Anti",      "伤害减免",     "DMG Reduction",   AttrType.Float);
-        S("MVSpeed_Bei",      "移动速度倍率",  "Move Spd Mult",  AttrType.Float);
-        S("ATSpeed_Bei",      "攻击速度倍率",  "ATK Spd Mult",   AttrType.Float);
-        S("Health_Bei",       "生命倍率",     "HP Mult",         AttrType.Float);
-        S("Health_Percent",   "生命百分比",   "HP Percent",      AttrType.Float);
-        S("Mana_Bei",         "法力倍率",     "MP Mult",         AttrType.Float);
-        S("Mana_Percent",     "法力百分比",   "MP Percent",      AttrType.Float);
-        S("BJrate",           "暴击率",       "Crit Rate",       AttrType.Float);
-        S("BJDamage",         "暴击伤害",     "Crit Damage",     AttrType.Float);
-        S("JYrate",           "穿透率",       "Penetration",     AttrType.Float);
-        S("GeDang",           "格挡",         "Block",           AttrType.Float);
-        S("FireDamage_Bei",   "火伤倍率",     "Fire DMG Mult",   AttrType.Float);
-        S("FrozenDamage_Bei", "冰伤倍率",     "Ice DMG Mult",    AttrType.Float);
-        S("ThunderDamage_Bei","雷伤倍率",     "Thunder DMG Mult",AttrType.Float);
-        S("PoisonDamage_Bei", "毒伤倍率",     "Poison DMG Mult", AttrType.Float);
-        S("PhysicsDamage_Bei","物理伤倍率",   "Phys DMG Mult",   AttrType.Float);
-        S("ShadowDamage_Bei", "暗影伤倍率",   "Shadow DMG Mult", AttrType.Float);
-        S("FireChuan",        "火穿透",       "Fire Pen",        AttrType.Float);
-        S("FrozenChuan",      "冰穿透",       "Ice Pen",         AttrType.Float);
-        S("ThunderChuan",     "雷穿透",       "Thunder Pen",     AttrType.Float);
-        S("PoisonChuan",      "毒穿透",       "Poison Pen",      AttrType.Float);
-        S("PhysicsChuan",     "物理穿透",     "Phys Pen",        AttrType.Float);
-        S("ShadowChuan",      "暗影穿透",     "Shadow Pen",      AttrType.Float);
-        S("FireAnti",         "火抗",         "Fire Res",        AttrType.Float);
-        S("FrozenAnti",       "冰抗",         "Ice Res",         AttrType.Float);
-        S("ThunderAnti",      "雷抗",         "Thunder Res",     AttrType.Float);
-        S("PoisonAnti",       "毒抗",         "Poison Res",      AttrType.Float);
-        S("PhysicsAnti",      "物抗",         "Phys Res",        AttrType.Float);
-        S("ShadowAnti",       "暗影抗",       "Shadow Res",      AttrType.Float);
-        S("CoolDown",         "冷却缩减",     "CD Reduction",    AttrType.Float);
-        S("ItemDrop_Rate",    "掉落率",       "Drop Rate",       AttrType.Float);
-        S("EXP_Range",        "经验范围",     "EXP Range",       AttrType.Float);
+        Add("Health",           "生命值",       AttrType.Float);
+        Add("Mana",             "法力值",       AttrType.Float);
+        Add("Level",            "等级",         AttrType.Int);
+        Add("Xp_Total",         "总经验值",     AttrType.Float);
+        Add("Xp_CurrentLevel",  "当前等级经验",  AttrType.Float);
+        Add("Damage_Bei",       "攻击倍率",     AttrType.Float);
+        Add("Damage_Anti",      "伤害减免",     AttrType.Float);
+        Add("MVSpeed_Bei",      "移动速度倍率",  AttrType.Float);
+        Add("ATSpeed_Bei",      "攻击速度倍率",  AttrType.Float);
+        Add("Health_Bei",       "生命倍率",     AttrType.Float);
+        Add("Health_Percent",   "生命百分比",   AttrType.Float);
+        Add("Mana_Bei",         "法力倍率",     AttrType.Float);
+        Add("Mana_Percent",     "法力百分比",   AttrType.Float);
+        Add("BJrate",           "暴击率",       AttrType.Float);
+        Add("BJDamage",         "暴击伤害",     AttrType.Float);
+        Add("JYrate",           "穿透率",       AttrType.Float);
+        Add("GeDang",           "格挡",         AttrType.Float);
+        Add("FireDamage_Bei",   "火伤倍率",     AttrType.Float);
+        Add("FrozenDamage_Bei", "冰伤倍率",     AttrType.Float);
+        Add("ThunderDamage_Bei","雷伤倍率",     AttrType.Float);
+        Add("PoisonDamage_Bei", "毒伤倍率",     AttrType.Float);
+        Add("PhysicsDamage_Bei","物理伤倍率",   AttrType.Float);
+        Add("ShadowDamage_Bei", "暗影伤倍率",   AttrType.Float);
+        Add("FireChuan",        "火穿透",       AttrType.Float);
+        Add("FrozenChuan",      "冰穿透",       AttrType.Float);
+        Add("ThunderChuan",     "雷穿透",       AttrType.Float);
+        Add("PoisonChuan",      "毒穿透",       AttrType.Float);
+        Add("PhysicsChuan",     "物理穿透",     AttrType.Float);
+        Add("ShadowChuan",      "暗影穿透",     AttrType.Float);
+        Add("FireAnti",         "火抗",         AttrType.Float);
+        Add("FrozenAnti",       "冰抗",         AttrType.Float);
+        Add("ThunderAnti",      "雷抗",         AttrType.Float);
+        Add("PoisonAnti",       "毒抗",         AttrType.Float);
+        Add("PhysicsAnti",      "物抗",         AttrType.Float);
+        Add("ShadowAnti",       "暗影抗",       AttrType.Float);
+        Add("CoolDown",         "冷却缩减",     AttrType.Float);
+        Add("ItemDrop_Rate",    "掉落率",       AttrType.Float);
+        Add("EXP_Range",        "经验范围",     AttrType.Float);
         TryMoney();
         TryTalent();
 
-        N("Damage_Base",      "基础攻击力",    "ATK Base",       AttrType.Float);
-        N("MVSpeed_Base",     "移动速度基础",  "Move Spd Base",  AttrType.Float);
-        N("ATSpeed_Base",     "攻击速度基础",  "ATK Spd Base",   AttrType.Float);
+        Add("Damage_Base",      "基础攻击力",    AttrType.Float);
+        Add("MVSpeed_Base",     "移动速度基础",  AttrType.Float);
+        Add("ATSpeed_Base",     "攻击速度基础",  AttrType.Float);
 
         // 立即填充当前值缓存
         _currentValues.Clear();
         foreach (var a in _attrs)
             _currentValues[a.Key] = a.Get(_player);
 
-        TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs", _attrs.Count));
+TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs", _attrs.Count));
     }
 
-    private void ApplyAll()
-    {
-        if (_player == null) return;
-        foreach (var a in _attrs)
-        {
-            if (_inputBuffers.TryGetValue(a.Key, out var v))
-            {
-                string old = a.Get(_player);
-                if (a.Set(_player, v)) a.AddDelta(_deltaF, _deltaI, _deltaL, old, v);
-            }
-        }
-    }
-
-    private void S(string f, string cn, string en, AttrType t) => _attrs.Add(AttrEntry.Make(f, cn, en, t, SaveStatus.Saved));
-    private void N(string f, string cn, string en, AttrType t) => _attrs.Add(AttrEntry.Make(f, cn, en, t, SaveStatus.NotSaved));
+    private void Add(string f, string cn, AttrType t) => _attrs.Add(AttrEntry.Make(f, cn, t));
 
     private void TryTalent()
     {
@@ -338,8 +335,8 @@ public class TrainerBehaviour : MonoBehaviour
             if (inst == null) return;
             var hf = t.GetField("P_Have", BindingFlags.Public | BindingFlags.Instance);
             var bf = t.GetField("P_Base", BindingFlags.Public | BindingFlags.Instance);
-            if (hf != null) _attrs.Add(AttrEntry.Ref("Talent_P_Have", "可用天赋点", "Talent Pts", AttrType.Int, SaveStatus.Saved, inst, hf));
-            if (bf != null) _attrs.Add(AttrEntry.Ref("Talent_P_Base", "天赋点(基础)", "Talent Base", AttrType.Int, SaveStatus.Saved, inst, bf));
+            if (hf != null) _attrs.Add(AttrEntry.Ref("Talent_P_Have", "可用天赋点", AttrType.Int, inst, hf));
+            if (bf != null) _attrs.Add(AttrEntry.Ref("Talent_P_Base", "天赋点(基础)", AttrType.Int, inst, bf));
         }
         catch { }
     }
@@ -360,76 +357,244 @@ public class TrainerBehaviour : MonoBehaviour
             var mf = inv.GetType().GetField("Money", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (mf == null) return;
             var iref = inv; var mref = mf;
-            _attrs.Add(new AttrEntry("Money", "金币", "Gold", AttrType.Long, SaveStatus.Saved,
+            _attrs.Add(new AttrEntry("Money", "金币", AttrType.Long,
                 _ => { try { return mref.GetValue(iref)?.ToString() ?? "0"; } catch { return "0"; } },
-                (_, v) => { try { if (long.TryParse(v, out var m)) { mref.SetValue(iref, m); return true; } } catch { } return false; },
-                null, null));
+                (_, v) => { try { if (long.TryParse(v, out var m)) { mref.SetValue(iref, m); return true; } } catch { } return false; }));
         }
         catch { }
+    }
+
+    private void WriteCleanAllToSave()
+    {
+        if (_player == null) return;
+        var pd = GetPlayerSaveData();
+        if (pd == null)
+        {
+            TrainerManager.Log.LogWarning("[Trainer] WriteCleanAllToSave: PlayerSaveData NULL");
+            return;
+        }
+        foreach (var a in _attrs)
+        {
+            if (HasDelta(a.Key))
+            {
+                string clean = a.SubDelta(a.Get(_player!), _deltaF, _deltaI, _deltaL);
+                bool ok = a.WriteSaveField(pd, clean);
+                if (!ok)
+                    TrainerManager.Log.LogWarning($"[Trainer] periodic save write failed: {a.Key} -> {clean}");
+            }
+        }
+    }
+
+    private object? GetSaveManagerInstance()
+    {
+        try
+        {
+            var smt = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (smt == null) return null;
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
+            string[] names = { "Instance", "I", "Current", "_instance", "instance", "Manager" };
+            foreach (var name in names)
+            {
+                var pi = smt.GetProperty(name, flags);
+                if (pi != null)
+                {
+                    var v = pi.GetValue(null);
+                    if (v != null) return v;
+                }
+                var fi = smt.GetField(name, flags);
+                if (fi != null)
+                {
+                    var v = fi.GetValue(null);
+                    if (v != null) return v;
+                }
+            }
+            return null;
+        }
+        catch { return null; }
+    }
+
+    private bool HasAnyDelta()
+    {
+        return _deltaF.Count > 0 || _deltaI.Count > 0 || _deltaL.Count > 0;
+    }
+
+    private void TryHandleSaveMoment()
+    {
+        if (_player == null) return;
+        if (!HasAnyDelta()) return;
+        var sm = GetSaveManagerInstance();
+        if (sm == null) return;
+        var pd = GetPlayerSaveData();
+        TrainerManager.Log.LogInfo($"[Trainer] SaveMoment: SaveManager active, PlayerSaveData={(pd == null ? "NULL" : "OK")}");
+        if (pd != null)
+            ResetAll();
+    }
+
+    private object? GetPlayerSaveData()
+    {
+        try
+        {
+            // 首选：PlayerManager 上直接挂着 SaveData 字段（日志已确认存在）
+            if (_player != null)
+            {
+                var fi = typeof(PlayerManager).GetField("SaveData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fi != null)
+                {
+                    var v = fi.GetValue(_player);
+                    if (v != null)
+                    {
+                        LogSaveDataDiag($"PlayerManager.SaveData OK type={v.GetType().FullName}");
+                        return v;
+                    }
+                    LogSaveDataDiag("PlayerManager.SaveData NULL");
+                }
+                else
+                {
+                    LogSaveDataDiag("PlayerManager.SaveData field not found");
+                }
+            }
+
+            // 兜底：SaveManager.Instance -> RuntimeData -> PlayerData
+            var sm = GetSaveManagerInstance();
+            if (sm == null)
+            {
+                LogSaveDataDiag("SaveManager.Instance/Field NULL");
+                return null;
+            }
+            var smType = sm.GetType();
+            const BindingFlags instFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+            var rdProp = smType.GetProperty("RuntimeData", instFlags);
+            var rdField = smType.GetField("RuntimeData", instFlags);
+            var rd = rdProp?.GetValue(sm) ?? rdField?.GetValue(sm);
+            if (rd == null)
+            {
+                LogSaveDataDiag($"SaveManager.RuntimeData NULL (type={smType.FullName}, prop={rdProp != null}, field={rdField != null})");
+                return null;
+            }
+            var rdType = rd.GetType();
+            var pdProp = rdType.GetProperty("PlayerData", instFlags);
+            var pdField = rdType.GetField("PlayerData", instFlags);
+            object? pd = null;
+            if (pdProp != null) pd = pdProp.GetValue(rd);
+            else if (pdField != null) pd = pdField.GetValue(rd);
+            if (pd == null)
+            {
+                LogSaveDataDiag($"RuntimeData.PlayerData NULL (runtimeType={rdType.FullName}, prop={pdProp != null}, field={pdField != null})");
+                return null;
+            }
+            LogSaveDataDiag($"PlayerData OK type={pd.GetType().FullName}");
+            return pd;
+        }
+        catch (Exception e)
+        {
+            LogSaveDataDiag("GetPlayerSaveData exception: " + e.Message);
+            return null;
+        }
+    }
+
+    private void LogSaveDataDiag(string msg)
+    {
+        if (_saveDataDiagLogged) return;
+        _saveDataDiagLogged = true;
+        TrainerManager.Log.LogWarning("[Trainer] SaveDataDiag: " + msg);
+    }
+
+    private void RefreshFromSave()
+    {
+        try
+        {
+            if (_player == null) return;
+            string[] names = { "RefreshRuntimeDerivedStats", "InitFromSaveData", "InitializeAfterSaveRestore" };
+            foreach (var name in names)
+            {
+                var mi = typeof(PlayerManager).GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (mi != null)
+                {
+                    mi.Invoke(_player, null);
+                    return;
+                }
+            }
+            TrainerManager.Log.LogWarning("[Trainer] No refresh method found on PlayerManager");
+        }
+        catch (Exception e)
+        {
+            TrainerManager.Log.LogWarning("[Trainer] RefreshFromSave failed: " + e.Message);
+        }
     }
 }
 
 public class AttrEntry
 {
-    public string Key, CN, EN;
+    public string Key, CN;
     public AttrType Type;
-    public SaveStatus Save;
     private readonly Func<PlayerManager, string> _get;
     private readonly Func<PlayerManager, string, bool> _set;
-    private readonly object? _refObj;
-    private readonly FieldInfo? _refField;
 
-    public AttrEntry(string key, string cn, string en, AttrType type, SaveStatus save,
-        Func<PlayerManager, string> get, Func<PlayerManager, string, bool> set, object? refObj, FieldInfo? refField)
-    { Key = key; CN = cn; EN = en; Type = type; Save = save; _get = get; _set = set; _refObj = refObj; _refField = refField; }
+    public AttrEntry(string key, string cn, AttrType type,
+        Func<PlayerManager, string> get, Func<PlayerManager, string, bool> set)
+    { Key = key; CN = cn; Type = type; _get = get; _set = set; }
 
-    public static AttrEntry Make(string f, string cn, string en, AttrType t, SaveStatus s)
+    public static AttrEntry Make(string f, string cn, AttrType t)
     {
         var fi = typeof(PlayerManager).GetField(f, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-        return new AttrEntry(f, cn, en, t, s,
+        return new AttrEntry(f, cn, t,
             (p) => ReadField(p, fi, t),
-            (p, v) => WriteField(p, fi, t, v),
-            null, null);
+            (p, v) => WriteField(p, fi, t, v));
     }
 
-    public static AttrEntry Ref(string f, string cn, string en, AttrType t, SaveStatus s, object obj, FieldInfo fi)
+    public static AttrEntry Ref(string f, string cn, AttrType t, object obj, FieldInfo fi)
     {
-        return new AttrEntry(f, cn, en, t, s,
+        return new AttrEntry(f, cn, t,
             (p) => ReadRef(obj, fi, t),
-            (p, v) => WriteRef(obj, fi, t, v),
-            obj, fi);
+            (p, v) => WriteRef(obj, fi, t, v));
     }
 
     public string Get(PlayerManager p) => _get(p);
     public bool Set(PlayerManager p, string v) => _set(p, v);
 
-    // delta += 新值 - 旧值
-    public void AddDelta(Dictionary<string, float> dF, Dictionary<string, int> dI, Dictionary<string, long> dL, string old, string nv)
+    public string AddToCurrent(string cur, string delta)
+    {
+        try
+        {
+            switch (Type)
+            {
+                case AttrType.Float:
+                    if (float.TryParse(cur, out var cf) && float.TryParse(delta, out var df)) return (cf + df).ToString("F2");
+                    break;
+                case AttrType.Int:
+                    if (int.TryParse(cur, out var ci) && int.TryParse(delta, out var di)) return (ci + di).ToString();
+                    break;
+                case AttrType.Long:
+                    if (long.TryParse(cur, out var cl) && long.TryParse(delta, out var dl)) return (cl + dl).ToString();
+                    break;
+            }
+        }
+        catch { }
+        return cur;
+    }
+
+    public void AddDelta(Dictionary<string, float> dF, Dictionary<string, int> dI, Dictionary<string, long> dL, string input)
     {
         switch (Type)
         {
             case AttrType.Float:
-                if (float.TryParse(old, out var o) && float.TryParse(nv, out var n))
-                { dF.TryGetValue(Key, out var c); dF[Key] = c + (n - o); }
+                if (float.TryParse(input, out var nf)) { dF.TryGetValue(Key, out var c); dF[Key] = c + nf; }
                 break;
             case AttrType.Int:
-                if (int.TryParse(old, out var oi) && int.TryParse(nv, out var ni))
-                { dI.TryGetValue(Key, out var c); dI[Key] = c + (ni - oi); }
+                if (int.TryParse(input, out var ni)) { dI.TryGetValue(Key, out var c); dI[Key] = c + ni; }
                 break;
             case AttrType.Long:
-                if (long.TryParse(old, out var ol) && long.TryParse(nv, out var nl))
-                { dL.TryGetValue(Key, out var c); dL[Key] = c + (nl - ol); }
+                if (long.TryParse(input, out var nl)) { dL.TryGetValue(Key, out var c); dL[Key] = c + nl; }
                 break;
         }
     }
 
-    // 重置：当前值 - delta
     public string SubDelta(string cur, Dictionary<string, float> dF, Dictionary<string, int> dI, Dictionary<string, long> dL)
     {
         switch (Type)
         {
             case AttrType.Float:
-                if (dF.TryGetValue(Key, out var df) && float.TryParse(cur, out var c)) return (c - df).ToString("F2");
+                if (dF.TryGetValue(Key, out var df) && float.TryParse(cur, out var cf)) return (cf - df).ToString("F2");
                 break;
             case AttrType.Int:
                 if (dI.TryGetValue(Key, out var di) && int.TryParse(cur, out var ci)) return (ci - di).ToString();
@@ -441,42 +606,24 @@ public class AttrEntry
         return cur;
     }
 
-    // 写入 PlayerSaveData
-    public void WriteSave(object pd)
+    public bool WriteSaveField(object pd, string raw)
     {
         try
         {
             var f = pd.GetType().GetField(Key, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (f == null) return;
-            string val = Get(null!);
+            if (f == null) return false;
             object? b = Type switch
             {
-                AttrType.Int => int.TryParse(val, out var iv) ? iv : null,
-                AttrType.Long => long.TryParse(val, out var lv) ? lv : null,
-                AttrType.Float => float.TryParse(val, out var fv) ? fv : null,
+                AttrType.Int => int.TryParse(raw, out var iv) ? iv : null,
+                AttrType.Long => long.TryParse(raw, out var lv) ? lv : null,
+                AttrType.Float => float.TryParse(raw, out var fv) ? fv : null,
                 _ => null
             };
-            if (b != null) f.SetValue(pd, b);
+            if (b == null) return false;
+            f.SetValue(pd, b);
+            return true;
         }
-        catch { }
-    }
-
-    public void WriteSave(PlayerManager p)
-    {
-        try
-        {
-            var smt = typeof(PlayerManager).Assembly.GetType("SaveManager");
-            if (smt == null) return;
-            var ip = smt.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
-                  ?? smt.GetProperty("Instance", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            var sm = ip?.GetValue(null);
-            if (sm == null) return;
-            var rd = smt.GetProperty("RuntimeData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(sm);
-            if (rd == null) return;
-            var pd = rd.GetType().GetProperty("PlayerData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(rd);
-            if (pd != null) WriteSave(pd);
-        }
-        catch { }
+        catch { return false; }
     }
 
     private static string ReadField(PlayerManager p, FieldInfo? fi, AttrType t)
@@ -516,5 +663,62 @@ public class AttrEntry
     }
 }
 
+internal static class HarmonySaveHook
+{
+    private static bool _applied;
+
+    internal static void Apply()
+    {
+        if (_applied) return;
+        _applied = true;
+        try
+        {
+            var harmony = new Harmony("com.shadowdungeon.trainer.savehook");
+            var smt = typeof(PlayerManager).Assembly.GetType("SaveManager");
+            if (smt == null)
+            {
+                TrainerManager.Log.LogWarning("[HarmonySaveHook] SaveManager type not found");
+                return;
+            }
+
+            string[] methodNames =
+            {
+                "BuildSaveSnapshot",
+                "SaveCurrentGameBlocking",
+                "SaveAndExitBlocking",
+                "RequestSave",
+                "SaveToSlot",
+                "SaveCurrentGameAsync",
+                "QueueExitSaveAfterCurrentSave",
+                "SaveAndExitAfterCurrentSaveAsync",
+                "CompleteSaveAfterDiskWriteAsync"
+            };
+
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
+            foreach (var name in methodNames)
+            {
+                int patched = 0;
+                foreach (var m in smt.GetMethods(flags))
+                {
+                    if (m.Name != name) continue;
+                    harmony.Patch(m, prefix: new HarmonyMethod(typeof(HarmonySaveHook), nameof(Prefix)));
+                    patched++;
+                    TrainerManager.Log.LogInfo($"[HarmonySaveHook] Patched {name} ({m.GetParameters().Length} params)");
+                }
+                if (patched == 0)
+                    TrainerManager.Log.LogWarning($"[HarmonySaveHook] Method not found: {name}");
+            }
+        }
+        catch (Exception e)
+        {
+            TrainerManager.Log.LogWarning("[HarmonySaveHook] Apply failed: " + e);
+        }
+    }
+
+    private static void Prefix()
+    {
+        TrainerBehaviour.Instance?.ResetAll();
+    }
+}
+
 public enum AttrType { Int, Long, Float, Bool }
-public enum SaveStatus { Saved, NotSaved }
