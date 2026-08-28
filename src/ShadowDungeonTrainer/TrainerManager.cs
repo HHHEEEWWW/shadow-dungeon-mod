@@ -127,24 +127,36 @@ public class TrainerBehaviour : MonoBehaviour
     }
 
     private float _lastScanTime;
+    private float _lastValueRefreshTime;
+    // 缓存当前值，避免每帧反射读取
+    private readonly Dictionary<string, string> _currentValues = new();
 
     private void Update()
     {
         // Home 键切换
         if (Input.GetKeyDown(KeyCode.Home))
         {
-            bool wasOpen = _showPanel;
             _showPanel = !_showPanel;
-            if (_showPanel && !wasOpen) Scan();   // 打开时立即扫
-            if (!_showPanel && wasOpen) Scan();    // 关闭时立即扫
+            if (_showPanel && _attrs.Count == 0) Scan();
         }
 
-        // 定时扫描：面板开→2秒，面板关→5秒
+        // 缓存 PlayerManager（避免每帧 FindObjectOfType）
+        if (_player == null) _player = UnityEngine.Object.FindObjectOfType<PlayerManager>();
+
+        // 定时完整扫描（只在没有属性列表或 PlayerManager 丢失时）
         float interval = _showPanel ? 2f : 5f;
         if (Time.realtimeSinceStartup - _lastScanTime >= interval)
         {
             _lastScanTime = Time.realtimeSinceStartup;
-            Scan();
+            if (_attrs.Count == 0 || _player == null) Scan();
+        }
+
+        // 刷新缓存当前值（比 Scan 轻量，只读字段）
+        if (_player != null && Time.realtimeSinceStartup - _lastValueRefreshTime >= 0.5f)
+        {
+            _lastValueRefreshTime = Time.realtimeSinceStartup;
+            foreach (var a in _attrs)
+                _currentValues[a.Key] = a.Get(_player!);
         }
     }
 
@@ -153,14 +165,14 @@ public class TrainerBehaviour : MonoBehaviour
         if (!_showPanel) return;
         if (_ls == null)
         {
-            _ls = new GUIStyle(GUI.skin.label) { fontSize = 32 };
-            _hs = new GUIStyle(GUI.skin.label) { fontSize = 32, fontStyle = FontStyle.Bold };
-            _ts = new GUIStyle(GUI.skin.label) { fontSize = 44, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            _ss = new GUIStyle(GUI.skin.label) { fontSize = 32, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
-            _phs = new GUIStyle(GUI.skin.label) { fontSize = 22, normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } };
+            _ls = new GUIStyle(GUI.skin.label) { fontSize = 22 };
+            _hs = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold };
+            _ts = new GUIStyle(GUI.skin.label) { fontSize = 31, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            _ss = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.8f, 0.9f, 1f) } };
+            _phs = new GUIStyle(GUI.skin.label) { fontSize = 15, normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } };
         }
-        GUI.skin.textField.fontSize = 30;
-        GUI.skin.button.fontSize = 28;
+        GUI.skin.textField.fontSize = 21;
+        GUI.skin.button.fontSize = 20;
 
         var pr = new Rect(20, 20, 1520, Screen.height - 40);
         GUI.Box(pr, "");
@@ -202,12 +214,12 @@ public class TrainerBehaviour : MonoBehaviour
 
     private void Row(ref float y, AttrEntry a)
     {
-        const float LW = 440, VW = 220, IW = 280, BW = 110, RH = 64, G = 8;
+        const float LW = 308, VW = 154, IW = 196, BW = 77, RH = 45, G = 6;
         string nm = _useChinese ? a.CN : a.EN;
         // 属性名
         GUI.Label(new Rect(0, y, LW, RH), nm, _ls);
-        // 当前值（实时，只读 label）
-        string cur = a.Get(_player!);
+        // 当前值（从缓存读取，不反射）
+        string cur = _currentValues.TryGetValue(a.Key, out var v) ? v : a.Get(_player!);
         GUI.Label(new Rect(LW, y, VW, RH), cur, _ls);
         // 输入框（只接收用户要修改的值，placeholder 提示）
         if (!_inputBuffers.ContainsKey(a.Key)) _inputBuffers[a.Key] = "";
