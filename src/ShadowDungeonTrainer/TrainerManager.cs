@@ -272,8 +272,6 @@ public class TrainerBehaviour : MonoBehaviour
         Add("Health",           "生命值",       AttrType.Float);
         Add("Mana",             "法力值",       AttrType.Float);
         Add("Level",            "等级",         AttrType.Int);
-        Add("Xp_Total",         "总经验值",     AttrType.Float);
-        Add("Xp_CurrentLevel",  "当前等级经验",  AttrType.Float);
         Add("Damage_Bei",       "攻击倍率",     AttrType.Float);
         Add("Damage_Anti",      "伤害减免",     AttrType.Float);
         Add("MVSpeed_Bei",      "移动速度倍率",  AttrType.Float);
@@ -307,6 +305,7 @@ public class TrainerBehaviour : MonoBehaviour
         Add("CoolDown",         "冷却缩减",     AttrType.Float);
         Add("ItemDrop_Rate",    "掉落率",       AttrType.Float);
         Add("EXP_Range",        "经验范围",     AttrType.Float);
+        TryAddExpRate();
         TryMoney();
         TryTalent();
 
@@ -323,6 +322,20 @@ TrainerManager.Log.LogInfo(string.Format("[Trainer] {0} attrs", _attrs.Count));
     }
 
     private void Add(string f, string cn, AttrType t) => _attrs.Add(AttrEntry.Make(f, cn, t));
+
+    private void TryAddExpRate()
+    {
+        // 游戏有“经验获取率提高”的药水，对应字段可能是 Xp_Bei_Tmp / XP_Rate / JY_Rate。
+        // 这里把存在的候选字段都加进去，优先 Xp_Bei_Tmp（临时经验倍率，最像药水效果）。
+        string[] candidates = { "Xp_Bei_Tmp", "XP_Rate", "JY_Rate" };
+        string[] names = { "经验获取倍率(临时)", "经验获取率", "经验获取率(JY)" };
+        for (int i = 0; i < candidates.Length; i++)
+        {
+            var fi = typeof(PlayerManager).GetField(candidates[i], BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (fi != null)
+                Add(candidates[i], names[i], AttrType.Float);
+        }
+    }
 
     private void TryTalent()
     {
@@ -683,15 +696,10 @@ internal static class HarmonySaveHook
 
             string[] methodNames =
             {
-                "BuildSaveSnapshot",
-                "SaveCurrentGameBlocking",
                 "SaveAndExitBlocking",
-                "RequestSave",
-                "SaveToSlot",
-                "SaveCurrentGameAsync",
+                "SaveAndExitAndWaitIfNeeded",
                 "QueueExitSaveAfterCurrentSave",
-                "SaveAndExitAfterCurrentSaveAsync",
-                "CompleteSaveAfterDiskWriteAsync"
+                "SaveAndExitAfterCurrentSaveAsync"
             };
 
             const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;

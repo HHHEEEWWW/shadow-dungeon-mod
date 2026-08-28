@@ -1,6 +1,6 @@
 # Shadow Dungeon 修改器 MOD
 
-> **当前版本：1.0.0**
+> **当前版本：1.0.1**
 
 为 Steam 游戏《Shadow Dungeon》（OO Cat，Unity 2019.4.39 Mono）开发的 BepInEx 5.x 修改器插件。
 
